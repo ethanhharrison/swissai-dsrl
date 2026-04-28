@@ -24,7 +24,7 @@ from jaxrl2.data import ReplayBuffer
 from jaxrl2.utils.wandb_logger import WandBLogger, create_exp_name
 import tempfile
 from functools import partial
-from examples.train_utils_sim import trajwise_alternating_training_loop
+from examples.train_utils_sim import trajwise_alternating_training_loop, iteration_based_training_loop
 import tensorflow as tf
 from jax.experimental.compilation_cache import compilation_cache
 
@@ -32,8 +32,11 @@ from openpi.training import config as openpi_config
 from openpi.policies import policy_config
 from openpi.shared import download
 
-home_dir = os.environ['HOME']
-compilation_cache.initialize_cache(os.path.join(home_dir, 'jax_compilation_cache'))
+_jax_cache_dir = os.environ.get(
+    "JAX_COMPILATION_CACHE_DIR",
+    os.path.join(os.environ["HOME"], "jax_compilation_cache"),
+)
+compilation_cache.initialize_cache(_jax_cache_dir)
 
 def _get_libero_env(task, resolution, seed):
     """Initializes and returns the LIBERO environment, along with the task description."""
@@ -97,6 +100,17 @@ def main(variant):
         import uuid
         variant.prefix = str(uuid.uuid4().fields[-1])[:5]
 
+    # Tag the prefix with the key ablation hyperparameters so the wandb run
+    # name, group name, and output dir are self-describing. Seed is already
+    # baked into expname by create_exp_name (as --s-{seed}).
+    _ablation_tag_parts = []
+    if variant.env == "libero":
+        _ablation_tag_parts.append(f"task{variant.task_id}")
+    if variant.get("iteration_size", 0) and variant.iteration_size > 0:
+        _ablation_tag_parts.append(f"iter{variant.iteration_size}")
+    _ablation_tag_parts.append(f"utd{variant.multi_grad_step}")
+    variant.prefix = f"{variant.prefix}_" + "_".join(_ablation_tag_parts)
+
     if variant.suffix:
         expname = create_exp_name(variant.prefix, seed=variant.seed) + f"_{variant.suffix}"
     else:
@@ -111,7 +125,11 @@ def main(variant):
     if variant.env == 'libero':
         benchmark_dict = benchmark.get_benchmark_dict()
         task_suite = benchmark_dict["libero_90"]()
-        task_id = 57
+        task_id = variant.task_id
+        assert 0 <= task_id < task_suite.n_tasks, (
+            f"--task_id={task_id} out of range for libero_90 "
+            f"(0..{task_suite.n_tasks - 1})"
+        )
         task = task_suite.get_task(task_id)
         env, task_description = _get_libero_env(task, 256, variant.seed)
         eval_env = env
@@ -145,13 +163,29 @@ def main(variant):
     
 
     if variant.env == 'libero':
-        config = openpi_config.get_config("pi0_libero")
-        checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
+        config = openpi_config.get_config("pi05_libero")
+        checkpoint_dir = download.maybe_download("gs://openpi-assets/checkpoints/pi05_libero")
     elif variant.env == 'aloha_cube':
         config = openpi_config.get_config("pi0_aloha_sim")
         checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_aloha_sim")
     else:
         raise NotImplementedError()
+    # pi05_libero has action_horizon=10; pi0_aloha_sim has action_horizon=50.
+    # The noise tensor passed to pi0's infer() must match action_horizon exactly,
+    # otherwise embed_suffix() produces an ar_mask that doesn't line up with the
+    # action tokens and beartype raises a jaxtyping shape error. Stash the value
+    # on variant so train_utils_sim can size the noise correctly.
+    variant.action_horizon = config.model.action_horizon
+    variant.action_dim = config.model.action_dim
+    # The training loop calls actions[t % query_freq] on an action chunk of
+    # length action_horizon, so query_freq must not exceed action_horizon.
+    # pi0_aloha_sim has horizon 50 (query_freq up to 50 OK); pi05_libero has
+    # horizon 10, so `--query_freq 20` (the old pi0_libero default) silently
+    # overruns the chunk and crashes ~10 steps into the first rollout.
+    assert variant.query_freq <= variant.action_horizon, (
+        f"--query_freq={variant.query_freq} exceeds the model's action_horizon "
+        f"({variant.action_horizon}) for config '{variant.env}'. Lower --query_freq."
+    )
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi0 policy from %s", checkpoint_dir)
     agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs)
@@ -160,5 +194,12 @@ def main(variant):
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
-    trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp)
+    if variant.get("iteration_size", 0) > 0:
+        iteration_based_training_loop(variant, agent, env, eval_env,
+                                      online_replay_buffer, replay_buffer, wandb_logger,
+                                      shard_fn=shard_fn, agent_dp=agent_dp)
+    else:
+        trajwise_alternating_training_loop(variant, agent, env, eval_env,
+                                           online_replay_buffer, replay_buffer, wandb_logger,
+                                           shard_fn=shard_fn, agent_dp=agent_dp)
  

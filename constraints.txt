@@ -1,0 +1,54 @@
+# Global constraints used alongside requirements.txt so pip picks a
+# consistent, non-backtracking dependency graph across dsrl_pi0, openpi
+# and openpi-client.
+
+# LIBERO has been validated against torch 2.6.0; this also overrides
+# openpi's torch==2.7.1 pin. The CPU wheels (see the --index-url flag
+# in the README) keep things slim and avoid CUDA conflicts with
+# jax[cuda12].
+torch==2.6.0
+
+# openpi's uv overrides tensorstore==0.1.74; keep that for orbax compat.
+tensorstore==0.1.74
+
+# `tensorflow==2.19.0`, `openpi`, and `openpi-client` all require numpy<2.
+# `datasets` 3.x/4.x drags in numpy 2.x, so pin older versions of the
+# lerobot data stack that still work on numpy 1.x.
+numpy==1.26.4
+pyarrow==16.1.0
+datasets==2.19.0
+dill==0.3.8
+multiprocess==0.70.16
+# lerobot 0cf86487 ships `orderly-set==5.4.0`; deepdiff 9 wants 5.5+, which
+# conflicts with the pin above. 8.x is the last release compatible with 5.4.
+deepdiff==8.6.0
+# torchcodec 0.11 needs torch>=2.7. Stay on 0.2.1 (the lerobot minimum)
+# so it works with torch 2.6.0.
+torchcodec==0.2.1
+
+# datasets==2.19.0 pins fsspec<=2024.3.1; newer fsspec breaks load_dataset.
+fsspec==2024.3.1
+
+# ---------------------------------------------------------------------------
+# CUDA stack pins for NVIDIA driver 545.x (CUDA 12.3) compute nodes.
+# ---------------------------------------------------------------------------
+# jax[cuda12]==0.5.3 resolves the full `nvidia-*-cu12` stack to CUDA 12.8
+# versions, which silently require driver >= 555. cuDNN 9.10 also requires
+# driver >= 550. On driver 545 this leads to:
+#     Failed call to cudaGetRuntimeVersion: Error loading CUDA libraries
+#     CUDNN_STATUS_INTERNAL_ERROR / DNN library initialization failed
+# Pinning the whole stack to the CUDA 12.6 wheels keeps JAX forward-
+# compatible with driver >= 525 (so driver 545 is fine).
+nvidia-cublas-cu12==12.6.4.1
+nvidia-cuda-cupti-cu12==12.6.80
+nvidia-cuda-nvcc-cu12==12.6.85
+nvidia-cuda-nvrtc-cu12==12.6.77
+nvidia-cuda-runtime-cu12==12.6.77
+nvidia-cudnn-cu12==9.5.1.17
+nvidia-cufft-cu12==11.3.0.4
+nvidia-curand-cu12==10.3.7.77
+nvidia-cusolver-cu12==11.7.1.2
+nvidia-cusparse-cu12==12.5.4.2
+nvidia-nccl-cu12==2.26.2
+nvidia-nvjitlink-cu12==12.6.85
+nvidia-nvtx-cu12==12.6.77

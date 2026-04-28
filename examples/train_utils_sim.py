@@ -160,6 +160,114 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
                         agent.save_checkpoint(variant.outputdir, i, variant.checkpoint_interval)
 
             
+def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger,
+                                   perform_control_evals=True, shard_fn=None, agent_dp=None):
+    """Collect-then-train loop with non-overlapping phases.
+
+    Each outer iteration:
+      1. Collect `variant.iteration_size` trajectories into the replay buffer.
+      2. Run exactly as many gradient steps as `trajwise_alternating_training_loop`
+         would have run while interleaving over those trajectories, i.e.
+             `sum_over_collected_trajs(len(traj["rewards"])) * variant.multi_grad_step`
+         (or `variant.num_online_gradsteps_batch * iteration_size` when the
+         override is set, matching the "one batch == one traj" convention of
+         the interleaved loop).
+      3. Return to (1); no env rollouts happen during the training phase.
+
+    `len(traj["rewards"])` counts query steps (one entry per policy query),
+    not raw env steps, so the total gradient-step budget matches the
+    interleaved loop exactly for the same stream of trajectories.
+    """
+    replay_buffer_iterator = replay_buffer.get_iterator(variant.batch_size)
+    if shard_fn is not None:
+        replay_buffer_iterator = map(shard_fn, replay_buffer_iterator)
+
+    iteration_size = variant.iteration_size
+    assert iteration_size >= 1, \
+        "iteration_size must be >= 1 for iteration_based_training_loop"
+
+    total_env_steps = 0
+    total_online_trajs = 0
+    i = 0
+    wandb_logger.log({'num_online_samples': 0}, step=i)
+    wandb_logger.log({'num_online_trajs': 0}, step=i)
+    wandb_logger.log({'env_steps': 0}, step=i)
+
+    with tqdm(total=variant.max_steps, initial=0) as pbar:
+        while i <= variant.max_steps:
+            # ---- collection phase: iteration_size trajectories, no updates ----
+            iter_query_steps = 0
+            iter_env_steps = 0
+            last_traj = None
+            for _ in range(iteration_size):
+                traj = collect_traj(variant, agent, env, i, agent_dp)
+                add_online_data_to_buffer(variant, traj, online_replay_buffer)
+                total_env_steps += traj['env_steps']
+                iter_env_steps += traj['env_steps']
+                iter_query_steps += len(traj['rewards'])
+                total_online_trajs += 1
+                last_traj = traj
+            print('online buffer timesteps length:', len(online_replay_buffer))
+            print('online buffer num traj:', total_online_trajs)
+            print('total env steps:', total_env_steps)
+            print(f'iteration env steps: {iter_env_steps} '
+                  f'(query steps: {iter_query_steps})')
+
+            if variant.get("num_online_gradsteps_batch", -1) > 0:
+                num_gradsteps = variant.num_online_gradsteps_batch * iteration_size
+            else:
+                num_gradsteps = iter_query_steps * variant.multi_grad_step
+
+            if len(online_replay_buffer) <= variant.start_online_updates:
+                # Not enough data yet; keep collecting before doing any updates.
+                continue
+
+            # ---- training phase: num_gradsteps updates, no env rollouts ----
+            for _ in range(num_gradsteps):
+                if i == 0:
+                    print('performing evaluation for initial checkpoint')
+                    if perform_control_evals:
+                        perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp)
+                    if hasattr(agent, 'perform_eval'):
+                        agent.perform_eval(variant, i, wandb_logger, replay_buffer,
+                                           replay_buffer_iterator, eval_env)
+
+                batch = next(replay_buffer_iterator)
+                update_info = agent.update(batch)
+
+                pbar.update()
+                i += 1
+
+                if i % variant.log_interval == 0:
+                    update_info = {k: jax.device_get(v) for k, v in update_info.items()}
+                    for k, v in update_info.items():
+                        if v.ndim == 0:
+                            wandb_logger.log({f'training/{k}': v}, step=i)
+                        elif v.ndim <= 2:
+                            wandb_logger.log_histogram(f'training/{k}', v, i)
+                    wandb_logger.log({
+                        'replay_buffer_size': len(online_replay_buffer),
+                        'episode_return (exploration)': last_traj['episode_return'],
+                        'is_success (exploration)': int(last_traj['is_success']),
+                    }, i)
+
+                if i % variant.eval_interval == 0:
+                    wandb_logger.log({'num_online_samples': len(online_replay_buffer)}, step=i)
+                    wandb_logger.log({'num_online_trajs': total_online_trajs}, step=i)
+                    wandb_logger.log({'env_steps': total_env_steps}, step=i)
+                    if perform_control_evals:
+                        perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp)
+                    if hasattr(agent, 'perform_eval'):
+                        agent.perform_eval(variant, i, wandb_logger, replay_buffer,
+                                           replay_buffer_iterator, eval_env)
+
+                if variant.checkpoint_interval != -1 and i % variant.checkpoint_interval == 0:
+                    agent.save_checkpoint(variant.outputdir, i, variant.checkpoint_interval)
+
+                if i > variant.max_steps:
+                    break
+
+
 def add_online_data_to_buffer(variant, traj, online_replay_buffer):
 
     discount_horizon = variant.query_freq
@@ -228,17 +336,21 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
             # we then use the noise to sample the action from diffusion model
             rng, key = jax.random.split(rng)
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
+            # pi0 models differ in action_horizon (pi0=50, pi05=10, etc.). The
+            # RL policy's action_chunk_shape[0] may be shorter, in which case we
+            # pad the tail with the last value so the noise matches the diffusion
+            # model's expected horizon exactly. variant.action_horizon is set in
+            # train_sim.main() from the openpi config.
+            action_horizon = variant.action_horizon
             if i == 0:
-                # for initial round of data collection, we sample from standard gaussian noise
                 noise = jax.random.normal(key, (1, *agent.action_chunk_shape))
-                noise_repeat = jax.numpy.repeat(noise[:, -1:, :], 50 - noise.shape[1], axis=1)
+                noise_repeat = jax.numpy.repeat(noise[:, -1:, :], action_horizon - noise.shape[1], axis=1)
                 noise = jax.numpy.concatenate([noise, noise_repeat], axis=1)
                 actions_noise = noise[0, :agent.action_chunk_shape[0], :]
             else:
-                # sac agent predicts the noise for diffusion model
                 actions_noise = agent.sample_actions(obs_dict)
                 actions_noise = np.reshape(actions_noise, agent.action_chunk_shape)
-                noise = np.repeat(actions_noise[-1:, :], 50 - actions_noise.shape[0], axis=0)
+                noise = np.repeat(actions_noise[-1:, :], action_horizon - actions_noise.shape[0], axis=0)
                 noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
             
             actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
@@ -340,13 +452,15 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
                 obs_pi_zero = obs_to_pi_zero_input(obs, variant)
                 
                 
+                # See collect_traj for why action_horizon / action_dim come from variant.
+                action_horizon = variant.action_horizon
+                action_dim = variant.action_dim
                 if i == 0:
-                    # for initial evaluation, we sample from standard gaussian noise to evaluate the base policy's performance
-                    noise = jax.random.normal(rng, (1, 50, 32))
+                    noise = jax.random.normal(rng, (1, action_horizon, action_dim))
                 else:
                     actions_noise = agent.sample_actions(obs_dict)
                     actions_noise = np.reshape(actions_noise, agent.action_chunk_shape)
-                    noise = np.repeat(actions_noise[-1:, :], 50 - actions_noise.shape[0], axis=0)
+                    noise = np.repeat(actions_noise[-1:, :], action_horizon - actions_noise.shape[0], axis=0)
                     noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
                     
                 actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]

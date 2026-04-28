@@ -6,15 +6,25 @@ export DISPLAY=:0
 export MUJOCO_GL=egl
 export MUJOCO_EGL_DEVICE_ID=$device_id
 
-export OPENPI_DATA_HOME=./openpi
-export EXP=./logs/$proj_name; 
+# See run_libero.sh for the rationale behind the scratch-redirection block.
+: "${DSRL_SCRATCH:=/global/scratch/users/$USER}"
+export OPENPI_DATA_HOME=$DSRL_SCRATCH/openpi_cache
+export HF_HOME=$DSRL_SCRATCH/hf_cache
+export TRANSFORMERS_CACHE=$HF_HOME/transformers
+export HF_DATASETS_CACHE=$HF_HOME/datasets
+export TORCH_HOME=$DSRL_SCRATCH/torch_cache
+export JAX_COMPILATION_CACHE_DIR=$DSRL_SCRATCH/jax_compilation_cache
+export PYTHONNOUSERSITE=1
+mkdir -p "$OPENPI_DATA_HOME" "$HF_HOME" "$TORCH_HOME" "$JAX_COMPILATION_CACHE_DIR"
+
+export EXP=$DSRL_SCRATCH/logs/$proj_name
 export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 
 pip install mujoco==2.3.7
 
-python3 examples/launch_train_sim.py \
+python3 -m examples.launch_train_sim \
 --algorithm pixel_sac \
 --env aloha_cube \
 --prefix dsrl_pi0_aloha \

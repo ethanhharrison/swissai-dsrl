@@ -19,8 +19,11 @@ from jax.experimental.compilation_cache import compilation_cache
 from openpi_client import websocket_client_policy as _websocket_client_policy
 from droid.robot_env import RobotEnv
 
-home_dir = os.environ['HOME']
-compilation_cache.initialize_cache(os.path.join(home_dir, 'jax_compilation_cache'))
+_jax_cache_dir = os.environ.get(
+    "JAX_COMPILATION_CACHE_DIR",
+    os.path.join(os.environ["HOME"], "jax_compilation_cache"),
+)
+compilation_cache.initialize_cache(_jax_cache_dir)
 
 def shard_batch(batch, sharding):
     """Shards a batch across devices along its first dimension.

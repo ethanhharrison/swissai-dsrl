@@ -25,6 +25,18 @@ if __name__ == '__main__':
     parser.add_argument('--multi_grad_step', default=1, help='Number of graident steps to take per environment step, aka UTD', type=int)
     parser.add_argument('--resize_image', default=-1, help='the size of image if need resizing', type=int)
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
+    parser.add_argument('--task_id', default=2,
+                        help='LIBERO task id within the libero_90 benchmark '
+                             '(0-89). Ignored for non-libero envs.',
+                        type=int)
+    parser.add_argument('--iteration_size', default=0,
+                        help='If > 0, use iteration_based_training_loop: '
+                             'collect this many trajectories, then do all the '
+                             'gradient updates the interleaved loop would have '
+                             'done over those trajectories before collecting '
+                             'again. If 0 (default), use the standard '
+                             'trajwise_alternating_training_loop.',
+                        type=int)
     
     train_args_dict = dict(
         actor_lr=1e-4,
