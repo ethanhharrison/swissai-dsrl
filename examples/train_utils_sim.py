@@ -177,6 +177,13 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
     `len(traj["rewards"])` counts query steps (one entry per policy query),
     not raw env steps, so the total gradient-step budget matches the
     interleaved loop exactly for the same stream of trajectories.
+
+    Termination criterion:
+      * If `variant.max_online_trajs > 0`, the outer loop stops once at least
+        that many trajectories have been collected. The training phase
+        following the final collection still runs to completion.
+      * Otherwise (default), the loop stops once `i > variant.max_steps`
+        gradient updates have been performed.
     """
     replay_buffer_iterator = replay_buffer.get_iterator(variant.batch_size)
     if shard_fn is not None:
@@ -186,6 +193,9 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
     assert iteration_size >= 1, \
         "iteration_size must be >= 1 for iteration_based_training_loop"
 
+    max_online_trajs = variant.get("max_online_trajs", 0)
+    limit_by_trajs = max_online_trajs > 0
+
     total_env_steps = 0
     total_online_trajs = 0
     i = 0
@@ -193,8 +203,17 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
     wandb_logger.log({'num_online_trajs': 0}, step=i)
     wandb_logger.log({'env_steps': 0}, step=i)
 
-    with tqdm(total=variant.max_steps, initial=0) as pbar:
-        while i <= variant.max_steps:
+    pbar_total = max_online_trajs if limit_by_trajs else variant.max_steps
+
+    with tqdm(total=pbar_total, initial=0) as pbar:
+        while True:
+            if limit_by_trajs:
+                if total_online_trajs >= max_online_trajs:
+                    break
+            else:
+                if i > variant.max_steps:
+                    break
+
             # ---- collection phase: iteration_size trajectories, no updates ----
             iter_query_steps = 0
             iter_env_steps = 0
@@ -207,6 +226,8 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
                 iter_query_steps += len(traj['rewards'])
                 total_online_trajs += 1
                 last_traj = traj
+                if limit_by_trajs:
+                    pbar.update()
             print('online buffer timesteps length:', len(online_replay_buffer))
             print('online buffer num traj:', total_online_trajs)
             print('total env steps:', total_env_steps)
@@ -235,7 +256,8 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
                 batch = next(replay_buffer_iterator)
                 update_info = agent.update(batch)
 
-                pbar.update()
+                if not limit_by_trajs:
+                    pbar.update()
                 i += 1
 
                 if i % variant.log_interval == 0:
@@ -264,7 +286,7 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
                 if variant.checkpoint_interval != -1 and i % variant.checkpoint_interval == 0:
                     agent.save_checkpoint(variant.outputdir, i, variant.checkpoint_interval)
 
-                if i > variant.max_steps:
+                if not limit_by_trajs and i > variant.max_steps:
                     break
 
 

@@ -39,7 +39,7 @@ MULTI_GRAD_STEPS = [1, 5, 10, 20]
 SEEDS = [0, 1]
 # LIBERO task id(s) within the libero_90 benchmark to ablate over. Add more
 # entries here to sweep tasks too.
-TASK_IDS = [2]
+TASK_IDS = [43]
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ NUM_PARALLEL = 1
 # Extra args forwarded to launch_train_sim (via run_ablation.sh). Override
 # anything you want different from run_ablation.sh's defaults here, e.g.
 # EXTRA_ARGS = ["--max_steps", "200000"].
-EXTRA_ARGS: list[str] = []
+EXTRA_ARGS: list[str] = ["--max_online_trajs", "5000"]
 
 OUTPUT_SBATCH = PROJ_ROOT / "sbatch_ablation.sh"
 

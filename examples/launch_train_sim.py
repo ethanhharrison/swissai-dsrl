@@ -37,6 +37,15 @@ if __name__ == '__main__':
                              'again. If 0 (default), use the standard '
                              'trajwise_alternating_training_loop.',
                         type=int)
+    parser.add_argument('--max_online_trajs', default=0,
+                        help='Only used by iteration_based_training_loop. If '
+                             '> 0, the outer loop terminates once at least '
+                             'this many trajectories have been collected '
+                             '(the training phase following the final '
+                             'collection still runs to completion). If 0 '
+                             '(default), termination is governed by '
+                             '--max_steps gradient updates as before.',
+                        type=int)
     
     train_args_dict = dict(
         actor_lr=1e-4,
