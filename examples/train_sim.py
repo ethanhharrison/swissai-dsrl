@@ -25,6 +25,7 @@ from jaxrl2.utils.wandb_logger import WandBLogger, create_exp_name
 import tempfile
 from functools import partial
 from examples.train_utils_sim import trajwise_alternating_training_loop, iteration_based_training_loop
+from examples.libero_multitask_env import MultiTaskLiberoEnv
 import tensorflow as tf
 from jax.experimental.compilation_cache import compilation_cache
 
@@ -37,6 +38,18 @@ _jax_cache_dir = os.environ.get(
     os.path.join(os.environ["HOME"], "jax_compilation_cache"),
 )
 compilation_cache.initialize_cache(_jax_cache_dir)
+
+def _parse_task_ids(task_ids_arg):
+    if task_ids_arg is None:
+        return []
+    if isinstance(task_ids_arg, (list, tuple)):
+        return [int(t) for t in task_ids_arg]
+    s = str(task_ids_arg).strip()
+    if not s:
+        return []
+    parts = [p for p in s.replace(",", " ").split() if p]
+    return [int(p) for p in parts]
+
 
 def _get_libero_env(task, resolution, seed):
     """Initializes and returns the LIBERO environment, along with the task description."""
@@ -105,7 +118,21 @@ def main(variant):
     # baked into expname by create_exp_name (as --s-{seed}).
     _ablation_tag_parts = []
     if variant.env == "libero":
-        _ablation_tag_parts.append(f"task{variant.task_id}")
+        if variant.get("multi_task", 0):
+            multi_task_ids = _parse_task_ids(variant.get("task_ids", ""))
+            if len(multi_task_ids) == 0:
+                raise ValueError(
+                    "--multi_task=1 requires a non-empty --task_ids list"
+                )
+            variant.multi_task_ids = multi_task_ids
+            if len(multi_task_ids) <= 6:
+                slug = "-".join(str(t) for t in multi_task_ids)
+            else:
+                slug = f"{len(multi_task_ids)}tasks_{multi_task_ids[0]}to{multi_task_ids[-1]}"
+            variant.task_id = f"multi_{slug}"
+            _ablation_tag_parts.append(f"task{variant.task_id}")
+        else:
+            _ablation_tag_parts.append(f"task{variant.task_id}")
     if variant.get("iteration_size", 0) and variant.iteration_size > 0:
         _ablation_tag_parts.append(f"iter{variant.iteration_size}")
     _ablation_tag_parts.append(f"utd{variant.multi_grad_step}")
@@ -125,15 +152,29 @@ def main(variant):
     if variant.env == 'libero':
         benchmark_dict = benchmark.get_benchmark_dict()
         task_suite = benchmark_dict["libero_90"]()
-        task_id = variant.task_id
-        assert 0 <= task_id < task_suite.n_tasks, (
-            f"--task_id={task_id} out of range for libero_90 "
-            f"(0..{task_suite.n_tasks - 1})"
-        )
-        task = task_suite.get_task(task_id)
-        env, task_description = _get_libero_env(task, 256, variant.seed)
-        eval_env = env
-        variant.task_description = task_description
+        if variant.get("multi_task", 0):
+            multi_task_ids = variant.multi_task_ids
+            env = MultiTaskLiberoEnv(
+                task_suite=task_suite,
+                task_ids=multi_task_ids,
+                resolution=256,
+                seed=variant.seed,
+                rng_seed=variant.seed,
+                mode="random",
+            )
+            eval_env = env
+            first_task = task_suite.get_task(multi_task_ids[0])
+            variant.task_description = first_task.language
+        else:
+            task_id = variant.task_id
+            assert 0 <= task_id < task_suite.n_tasks, (
+                f"--task_id={task_id} out of range for libero_90 "
+                f"(0..{task_suite.n_tasks - 1})"
+            )
+            task = task_suite.get_task(task_id)
+            env, task_description = _get_libero_env(task, 256, variant.seed)
+            eval_env = env
+            variant.task_description = task_description
         variant.env_max_reward = 1
         variant.max_timesteps = 400
     elif variant.env == 'aloha_cube':

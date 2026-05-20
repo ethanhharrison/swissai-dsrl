@@ -42,8 +42,16 @@ mkdir -p "$OPENPI_DATA_HOME" "$HF_HOME" "$TORCH_HOME" "$JAX_COMPILATION_CACHE_DI
 export EXP=$DSRL_SCRATCH/logs/$proj_name
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-echo "[run_ablation] iter_size=$ITER_SIZE utd=$MULTI_GRAD_STEP seed=$SEED task_id=$TASK_ID"
+MULTI_TASK_IDS=${DSRL_MULTI_TASK_IDS:-}
+echo "[run_ablation] iter_size=$ITER_SIZE utd=$MULTI_GRAD_STEP seed=$SEED task_id=$TASK_ID multi_task_ids=${MULTI_TASK_IDS:-<unset>}"
 echo "[run_ablation] extra args: $*"
+
+libero_extra=()
+if [ -n "$MULTI_TASK_IDS" ]; then
+    libero_extra+=("--multi_task" "1" "--task_ids" "$MULTI_TASK_IDS")
+else
+    libero_extra+=("--task_id" "$TASK_ID")
+fi
 
 python3 -m examples.launch_train_sim \
     --algorithm pixel_sac \
@@ -64,5 +72,5 @@ python3 -m examples.launch_train_sim \
     --seed "$SEED" \
     --multi_grad_step "$MULTI_GRAD_STEP" \
     --iteration_size "$ITER_SIZE" \
-    --task_id "$TASK_ID" \
+    "${libero_extra[@]}" \
     "$@"

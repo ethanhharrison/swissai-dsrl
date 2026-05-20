@@ -27,8 +27,16 @@ if __name__ == '__main__':
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
     parser.add_argument('--task_id', default=2,
                         help='LIBERO task id within the libero_90 benchmark '
-                             '(0-89). Ignored for non-libero envs.',
+                             '(0-89). Ignored when --multi_task=1.',
                         type=int)
+    parser.add_argument('--multi_task', default=0,
+                        help='If 1, use MultiTaskLiberoEnv and sample from '
+                             '--task_ids on each env.reset().',
+                        type=int)
+    parser.add_argument('--task_ids', default='',
+                        help='Comma- or space-separated libero_90 task ids '
+                             'for --multi_task=1 (e.g. "28,29,30,31,32").',
+                        type=str)
     parser.add_argument('--iteration_size', default=0,
                         help='If > 0, use iteration_based_training_loop: '
                              'collect this many trajectories, then do all the '
