@@ -88,6 +88,74 @@ def obs_to_qpos(obs, variant):
         raise NotImplementedError()
     return qpos
 
+
+def _inference_delay(variant):
+    return int(variant.get("inference_delay", 0))
+
+
+def _should_query_policy(t, inference_delay, query_freq):
+    """Return whether to run a new policy inference at env step ``t``."""
+    if inference_delay == 0:
+        return t % query_freq == 0
+    return t == 0 or (t >= inference_delay and (t - inference_delay) % query_freq == 0)
+
+
+def _conditioning_timestep(t, inference_delay):
+    """Env step whose observation conditions the policy query at step ``t``."""
+    if inference_delay == 0:
+        return t
+    if t == 0:
+        return 0
+    return t - inference_delay
+
+
+def _chunk_action_index(t, inference_delay, query_freq):
+    """Index into the current action chunk for env step ``t``."""
+    if inference_delay == 0:
+        return t % query_freq
+    if t < inference_delay:
+        return t
+    return inference_delay + ((t - inference_delay) % query_freq)
+
+
+def _raw_obs_to_obs_dict(raw_obs, variant):
+    curr_image = obs_to_img(raw_obs, variant)
+    qpos = obs_to_qpos(raw_obs, variant)
+    if variant.add_states:
+        return {
+            'pixels': curr_image[np.newaxis, ..., np.newaxis],
+            'state': qpos[np.newaxis, ..., np.newaxis],
+        }
+    return {
+        'pixels': curr_image[np.newaxis, ..., np.newaxis],
+    }
+
+
+def _infer_action_chunk(variant, agent, agent_dp, rng, obs_dict, raw_obs, i):
+    """Run pi0 inference and return (actions, actions_noise, updated_rng)."""
+    rng, key = jax.random.split(rng)
+    obs_pi_zero = obs_to_pi_zero_input(raw_obs, variant)
+    action_horizon = variant.action_horizon
+    if i == 0:
+        noise = jax.random.normal(key, (1, *agent.action_chunk_shape))
+        noise_repeat = jax.numpy.repeat(
+            noise[:, -1:, :], action_horizon - noise.shape[1], axis=1
+        )
+        noise = jax.numpy.concatenate([noise, noise_repeat], axis=1)
+        actions_noise = noise[0, :agent.action_chunk_shape[0], :]
+    else:
+        actions_noise = agent.sample_actions(obs_dict)
+        actions_noise = np.reshape(actions_noise, agent.action_chunk_shape)
+        noise = np.repeat(
+            actions_noise[-1:, :],
+            action_horizon - actions_noise.shape[0],
+            axis=0,
+        )
+        noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
+    actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+    return actions, actions_noise, rng
+
+
 def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger,
                                        perform_control_evals=True, shard_fn=None, agent_dp=None):
     replay_buffer_iterator = replay_buffer.get_iterator(variant.batch_size)
@@ -338,6 +406,7 @@ def _is_multitask_libero(env, variant):
 
 def collect_traj(variant, agent, env, i, agent_dp=None):
     query_frequency = variant.query_freq
+    inference_delay = _inference_delay(variant)
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
 
@@ -353,50 +422,26 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
     rewards = []
     action_list = []
     obs_list = []
+    raw_obs_history = []
+    actions = None
 
     for t in tqdm(range(max_timesteps)):
+        raw_obs_history.append(obs)
         curr_image = obs_to_img(obs, variant)
-        
-        qpos = obs_to_qpos(obs, variant)
 
-        if variant.add_states:
-            obs_dict = {
-                'pixels': curr_image[np.newaxis, ..., np.newaxis],
-                'state': qpos[np.newaxis, ..., np.newaxis],
-            }
-        else:
-            obs_dict = {
-                'pixels': curr_image[np.newaxis, ..., np.newaxis],
-            }
-
-        if t % query_frequency == 0:
-
+        if _should_query_policy(t, inference_delay, query_frequency):
             assert agent_dp is not None
-            # we then use the noise to sample the action from diffusion model
-            rng, key = jax.random.split(rng)
-            obs_pi_zero = obs_to_pi_zero_input(obs, variant)
-            # pi0 models differ in action_horizon (pi0=50, pi05=10, etc.). The
-            # RL policy's action_chunk_shape[0] may be shorter, in which case we
-            # pad the tail with the last value so the noise matches the diffusion
-            # model's expected horizon exactly. variant.action_horizon is set in
-            # train_sim.main() from the openpi config.
-            action_horizon = variant.action_horizon
-            if i == 0:
-                noise = jax.random.normal(key, (1, *agent.action_chunk_shape))
-                noise_repeat = jax.numpy.repeat(noise[:, -1:, :], action_horizon - noise.shape[1], axis=1)
-                noise = jax.numpy.concatenate([noise, noise_repeat], axis=1)
-                actions_noise = noise[0, :agent.action_chunk_shape[0], :]
-            else:
-                actions_noise = agent.sample_actions(obs_dict)
-                actions_noise = np.reshape(actions_noise, agent.action_chunk_shape)
-                noise = np.repeat(actions_noise[-1:, :], action_horizon - actions_noise.shape[0], axis=0)
-                noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
-            
-            actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+            cond_t = _conditioning_timestep(t, inference_delay)
+            cond_obs = raw_obs_history[cond_t]
+            obs_dict = _raw_obs_to_obs_dict(cond_obs, variant)
+            actions, actions_noise, rng = _infer_action_chunk(
+                variant, agent, agent_dp, rng, obs_dict, cond_obs, i
+            )
             action_list.append(actions_noise)
             obs_list.append(obs_dict)
-     
-        action_t = actions[t % query_frequency]
+
+        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
+        action_t = actions[action_idx]
         if 'libero' in variant.env:
             obs, reward, done, _ = env.step(action_t)
         elif 'aloha' in variant.env:
@@ -451,6 +496,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
 def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
     """Single eval episode in the env's current task."""
     query_frequency = variant.query_freq
+    inference_delay = _inference_delay(variant)
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
 
@@ -463,42 +509,24 @@ def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
     image_list = []
     rewards = []
     reward = 0
+    raw_obs_history = []
+    actions = None
 
     for t in tqdm(range(max_timesteps)):
+        raw_obs_history.append(obs)
         curr_image = obs_to_img(obs, variant)
 
-        if t % query_frequency == 0:
-            qpos = obs_to_qpos(obs, variant)
-            if variant.add_states:
-                obs_dict = {
-                    'pixels': curr_image[np.newaxis, ..., np.newaxis],
-                    'state': qpos[np.newaxis, ..., np.newaxis],
-                }
-            else:
-                obs_dict = {
-                    'pixels': curr_image[np.newaxis, ..., np.newaxis],
-                }
-
-            rng, key = jax.random.split(rng)
+        if _should_query_policy(t, inference_delay, query_frequency):
             assert agent_dp is not None
-            obs_pi_zero = obs_to_pi_zero_input(obs, variant)
-            action_horizon = variant.action_horizon
-            action_dim = variant.action_dim
-            if i == 0:
-                noise = jax.random.normal(rng, (1, action_horizon, action_dim))
-            else:
-                actions_noise = agent.sample_actions(obs_dict)
-                actions_noise = np.reshape(actions_noise, agent.action_chunk_shape)
-                noise = np.repeat(
-                    actions_noise[-1:, :],
-                    action_horizon - actions_noise.shape[0],
-                    axis=0,
-                )
-                noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
+            cond_t = _conditioning_timestep(t, inference_delay)
+            cond_obs = raw_obs_history[cond_t]
+            obs_dict = _raw_obs_to_obs_dict(cond_obs, variant)
+            actions, _, rng = _infer_action_chunk(
+                variant, agent, agent_dp, rng, obs_dict, cond_obs, i
+            )
 
-            actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
-
-        action_t = actions[t % query_frequency]
+        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
+        action_t = actions[action_idx]
 
         if 'libero' in variant.env:
             obs, reward, done, _ = env.step(action_t)
@@ -522,6 +550,7 @@ def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
 
 def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
     print('query frequency', variant.query_freq)
+    print('inference delay', _inference_delay(variant))
     env_max_reward = variant.env_max_reward
     rng = jax.random.PRNGKey(variant.seed + 456)
 

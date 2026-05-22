@@ -25,6 +25,12 @@ if __name__ == '__main__':
     parser.add_argument('--multi_grad_step', default=1, help='Number of graident steps to take per environment step, aka UTD', type=int)
     parser.add_argument('--resize_image', default=-1, help='the size of image if need resizing', type=int)
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
+    parser.add_argument('--inference_delay', default=0,
+                        help='Artificial inference delay (env steps) during rollouts. '
+                             'At step t+d the policy is conditioned on the observation '
+                             'from step t; the first chunk plays indices 0..d-1, then '
+                             'indices d+1..d+query_freq per query. 0 disables delay.',
+                        type=int)
     parser.add_argument('--task_id', default=2,
                         help='LIBERO task id within the libero_90 benchmark '
                              '(0-89). Ignored when --multi_task=1.',

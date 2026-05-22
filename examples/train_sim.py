@@ -227,6 +227,18 @@ def main(variant):
         f"--query_freq={variant.query_freq} exceeds the model's action_horizon "
         f"({variant.action_horizon}) for config '{variant.env}'. Lower --query_freq."
     )
+    inference_delay = int(variant.get("inference_delay", 0))
+    assert inference_delay >= 0, (
+        f"--inference_delay={inference_delay} must be non-negative."
+    )
+    if inference_delay > 0:
+        max_chunk_index = inference_delay + variant.query_freq
+        assert max_chunk_index < variant.action_horizon, (
+            f"--inference_delay={inference_delay} with --query_freq="
+            f"{variant.query_freq} requires action chunk indices up to "
+            f"{max_chunk_index}, but action_horizon is only "
+            f"{variant.action_horizon}. Lower --inference_delay or --query_freq."
+        )
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi0 policy from %s", checkpoint_dir)
     agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs)
