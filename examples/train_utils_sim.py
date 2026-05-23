@@ -93,29 +93,20 @@ def _inference_delay(variant):
     return int(variant.get("inference_delay", 0))
 
 
-def _should_query_policy(t, inference_delay, query_freq):
-    """Return whether to run a new policy inference at env step ``t``."""
-    if inference_delay == 0:
-        return t % query_freq == 0
-    return t == 0 or (t >= inference_delay and (t - inference_delay) % query_freq == 0)
-
-
 def _conditioning_timestep(t, inference_delay):
     """Env step whose observation conditions the policy query at step ``t``."""
-    if inference_delay == 0:
+    if t < inference_delay:
         return t
-    if t == 0:
-        return 0
     return t - inference_delay
 
 
 def _chunk_action_index(t, inference_delay, query_freq):
     """Index into the current action chunk for env step ``t``."""
-    if inference_delay == 0:
-        return t % query_freq
-    if t < inference_delay:
+    if t < query_freq:
         return t
-    return inference_delay + ((t - inference_delay) % query_freq)
+    if t < inference_delay:
+        return t % query_freq
+    return inference_delay + (t % query_freq)
 
 
 def _raw_obs_to_obs_dict(raw_obs, variant):
@@ -131,12 +122,16 @@ def _raw_obs_to_obs_dict(raw_obs, variant):
     }
 
 
-def _infer_action_chunk(variant, agent, agent_dp, rng, obs_dict, raw_obs, i):
+def _infer_action_chunk(variant, agent, agent_dp, rng, obs_dict, raw_obs, i, is_eval):
     """Run pi0 inference and return (actions, actions_noise, updated_rng)."""
     rng, key = jax.random.split(rng)
     obs_pi_zero = obs_to_pi_zero_input(raw_obs, variant)
     action_horizon = variant.action_horizon
-    if i == 0:
+    action_dim = variant.action_dim
+    if i == 0 and is_eval:
+        noise = jax.random.normal(rng, (1, action_horizon, action_dim))
+        actions_noise = None
+    elif i == 0:
         noise = jax.random.normal(key, (1, *agent.action_chunk_shape))
         noise_repeat = jax.numpy.repeat(
             noise[:, -1:, :], action_horizon - noise.shape[1], axis=1
@@ -429,13 +424,13 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
         raw_obs_history.append(obs)
         curr_image = obs_to_img(obs, variant)
 
-        if _should_query_policy(t, inference_delay, query_frequency):
+        if t % query_frequency == 0:
             assert agent_dp is not None
             cond_t = _conditioning_timestep(t, inference_delay)
             cond_obs = raw_obs_history[cond_t]
             obs_dict = _raw_obs_to_obs_dict(cond_obs, variant)
             actions, actions_noise, rng = _infer_action_chunk(
-                variant, agent, agent_dp, rng, obs_dict, cond_obs, i
+                variant, agent, agent_dp, rng, obs_dict, cond_obs, i, False
             )
             action_list.append(actions_noise)
             obs_list.append(obs_dict)
@@ -516,13 +511,13 @@ def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
         raw_obs_history.append(obs)
         curr_image = obs_to_img(obs, variant)
 
-        if _should_query_policy(t, inference_delay, query_frequency):
+        if t % query_frequency == 0:
             assert agent_dp is not None
             cond_t = _conditioning_timestep(t, inference_delay)
             cond_obs = raw_obs_history[cond_t]
             obs_dict = _raw_obs_to_obs_dict(cond_obs, variant)
             actions, _, rng = _infer_action_chunk(
-                variant, agent, agent_dp, rng, obs_dict, cond_obs, i
+                variant, agent, agent_dp, rng, obs_dict, cond_obs, i, True
             )
 
         action_idx = _chunk_action_index(t, inference_delay, query_frequency)

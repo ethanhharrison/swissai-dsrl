@@ -15,10 +15,10 @@ set -euo pipefail
 REPO=/global/home/users/ehharrison/dsrl_pi0
 mkdir -p "$REPO/slurm_logs"
 
-DELAYS=(0 2 5)
-SEEDS=(0 1)
+DELAYS=(2 5 10 20)
+SEEDS=(2 3)
 QUERY_FREQ=25
-MULTI_GRAD_STEP=${DSRL_MULTI_GRAD_STEP:-20}
+MULTI_GRAD_STEP=${DSRL_MULTI_GRAD_STEP:-25}
 WANDB_PROJECT=${DSRL_WANDB_PROJECT:-DSRL_pi0_InferenceDelay_Aloha}
 MAX_ONLINE_TRAJS=${DSRL_MAX_ONLINE_TRAJS:-5000}
 
