@@ -82,12 +82,16 @@ class DummyEnv(gym.ObservationWrapper):
         self.image_shape = (variant.resize_image, variant.resize_image, 3 * variant.num_cameras, 1)
         obs_dict = {}
         obs_dict['pixels'] = Box(low=0, high=255, shape=self.image_shape, dtype=np.uint8)
+        if variant.rl_inference_delay > 0:
+            obs_dict['rl_pixels'] = Box(low=0, high=255, shape=self.image_shape, dtype=np.uint8)
         if variant.add_states:
             if variant.env == 'libero':
                 state_dim = 8
             elif variant.env == 'aloha_cube':
                 state_dim = 14
             obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
+            if variant.rl_inference_delay > 0:
+                obs_dict['rl_state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
         if variant.num_prev_actions > 0:
             prev_action_dim = variant.num_prev_actions * int(variant.played_action_dim)
             obs_dict['prev_action'] = Box(
@@ -261,6 +265,23 @@ def main(variant):
             f"--num_prev_actions={variant.num_prev_actions} must equal "
             f"--inference_delay={variant.inference_delay} (condition on the "
             f"last d played actions during the delay window)."
+        )
+
+    rl_inference_delay = int(variant.rl_inference_delay)
+    assert rl_inference_delay >= 0, (
+        f"--rl_inference_delay={rl_inference_delay} must be non-negative."
+    )
+    if rl_inference_delay > 0:
+        assert variant.inference_delay > 0, (
+            f"--rl_inference_delay={rl_inference_delay} requires --inference_delay > 0."
+        )
+        assert rl_inference_delay < variant.inference_delay, (
+            f"--rl_inference_delay={rl_inference_delay} must be strictly less than "
+            f"--inference_delay={variant.inference_delay}."
+        )
+    elif variant.inference_delay == 0:
+        assert rl_inference_delay == 0, (
+            f"--rl_inference_delay must be 0 when --inference_delay=0."
         )
 
     dummy_env = DummyEnv(variant)

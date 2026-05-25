@@ -49,13 +49,19 @@ class PixelMultiplexer(nn.Module):
                  training: bool = False):
         observations = FrozenDict(observations)
 
-        x = self.encoder(observations['pixels'], training)
-        if self.use_bottleneck:
-            x = nn.Dense(self.latent_dim, kernel_init=xavier_init())(x)
-            x = nn.LayerNorm()(x)
-            x = nn.tanh(x)
+        def encode_pixels(pixels):
+            x = self.encoder(pixels, training)
+            if self.use_bottleneck:
+                x = nn.Dense(self.latent_dim, kernel_init=xavier_init())(x)
+                x = nn.LayerNorm()(x)
+                x = nn.tanh(x)
+            return x
 
-        x = observations.copy(add_or_replace={'pixels': x})
+        encoded = {'pixels': encode_pixels(observations['pixels'])}
+        if 'rl_pixels' in observations:
+            encoded['rl_pixels'] = encode_pixels(observations['rl_pixels'])
+
+        x = observations.copy(add_or_replace=encoded)
 
         # print('fully connected keys', x.keys())
         if actions is None:

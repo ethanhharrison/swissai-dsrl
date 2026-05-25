@@ -124,6 +124,7 @@ def _chunk_action_index(t, inference_delay, query_freq):
 
 
 def _raw_obs_to_obs_dict(raw_obs, variant):
+    """Primary delayed observation s_{t-d} for SAC (pixels/state)."""
     curr_image = obs_to_img(raw_obs, variant)
     qpos = obs_to_qpos(raw_obs, variant)
     if variant.add_states:
@@ -134,6 +135,32 @@ def _raw_obs_to_obs_dict(raw_obs, variant):
     return {
         'pixels': curr_image[np.newaxis, ..., np.newaxis],
     }
+
+
+def _raw_obs_to_rl_obs_dict(raw_obs, variant):
+    """More recent delayed observation s_{t-d'} for SAC only (rl_pixels/rl_state)."""
+    curr_image = obs_to_img(raw_obs, variant)
+    obs_dict = {
+        'rl_pixels': curr_image[np.newaxis, ..., np.newaxis],
+    }
+    if variant.add_states:
+        qpos = obs_to_qpos(raw_obs, variant)
+        obs_dict['rl_state'] = qpos[np.newaxis, ..., np.newaxis]
+    return obs_dict
+
+
+def _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant):
+    """SAC observation at query step ``t``: s_{t-d}, optional s_{t-d''}, optional prev actions."""
+    inference_delay = variant.inference_delay
+    cond_obs = raw_obs_history[_conditioning_timestep(t, inference_delay)]
+    obs_dict = _raw_obs_to_obs_dict(cond_obs, variant)
+    rl_delay = int(variant.rl_inference_delay)
+    if rl_delay > 0:
+        rl_cond_obs = raw_obs_history[_conditioning_timestep(t, rl_delay)]
+        obs_dict.update(_raw_obs_to_rl_obs_dict(rl_cond_obs, variant))
+    if variant.num_prev_actions > 0:
+        obs_dict.update(_prev_action_obs(played_action_history, variant))
+    return obs_dict
 
 
 def _infer_action_chunk(variant, agent, agent_dp, rng, obs_dict, raw_obs, i, is_eval):
@@ -375,6 +402,8 @@ def add_online_data_to_buffer(variant, traj, online_replay_buffer):
         if not variant.add_states:
             obs.pop('state', None)
             next_obs.pop('state', None)
+            obs.pop('rl_state', None)
+            next_obs.pop('rl_state', None)
         
         insert_dict = dict(
             observations=obs,
@@ -435,9 +464,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
             assert agent_dp is not None
             cond_t = _conditioning_timestep(t, inference_delay)
             cond_obs = raw_obs_history[cond_t]
-            obs_dict = _raw_obs_to_obs_dict(cond_obs, variant)
-            if num_prev_actions > 0:
-                obs_dict.update(_prev_action_obs(played_action_history, variant))
+            obs_dict = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
             actions, actions_noise, rng = _infer_action_chunk(
                 variant, agent, agent_dp, rng, obs_dict, cond_obs, i, False
             )
@@ -459,15 +486,8 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
         if done:
             break
 
-    # add last observation
-    curr_image = obs_to_img(obs, variant)
-    qpos = obs_to_qpos(obs, variant)
-    obs_dict = {
-        'pixels': curr_image[np.newaxis, ..., np.newaxis],
-        'state': qpos[np.newaxis, ..., np.newaxis],
-    }
-    if num_prev_actions > 0:
-        obs_dict.update(_prev_action_obs(played_action_history, variant))
+    # Terminal next observation (same delay indexing as query steps).
+    obs_dict = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
     obs_list.append(obs_dict)
     image_list.append(curr_image)
     
@@ -530,9 +550,7 @@ def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
             assert agent_dp is not None
             cond_t = _conditioning_timestep(t, inference_delay)
             cond_obs = raw_obs_history[cond_t]
-            obs_dict = _raw_obs_to_obs_dict(cond_obs, variant)
-            if num_prev_actions > 0:
-                obs_dict.update(_prev_action_obs(played_action_history, variant))
+            obs_dict = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
             actions, _, rng = _infer_action_chunk(
                 variant, agent, agent_dp, rng, obs_dict, cond_obs, i, True
             )
@@ -565,6 +583,7 @@ def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
 def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
     print('query frequency', variant.query_freq)
     print('inference delay', variant.inference_delay)
+    print('rl inference delay', variant.rl_inference_delay)
     print('num prev actions', variant.num_prev_actions)
     env_max_reward = variant.env_max_reward
     rng = jax.random.PRNGKey(variant.seed + 456)

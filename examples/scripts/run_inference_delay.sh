@@ -7,6 +7,8 @@
 # Optional env:
 #   DSRL_CONDITION_ON_PREV_ACTIONS  If 1, pass --num_prev_actions equal to
 #                                   inference_delay (last d played actions). Default: 0.
+#   DSRL_RL_INFERENCE_DELAY         If > 0, SAC also sees s_{t-d'} with d' < inference_delay.
+#   (sbatch sweeps use DSRL_RL_INFERENCE_DELAY_LIST, e.g. "0,5,10")
 #
 # Examples:
 #   run_inference_delay.sh libero 5 2 20 0 28 --max_online_trajs 5000
@@ -34,6 +36,7 @@ fi
 
 proj_name=${DSRL_WANDB_PROJECT:-DSRL_pi0_InferenceDelay}
 CONDITION_ON_PREV=${DSRL_CONDITION_ON_PREV_ACTIONS:-0}
+RL_INFERENCE_DELAY=${DSRL_RL_INFERENCE_DELAY:-0}
 device_id=${CUDA_VISIBLE_DEVICES:-0}
 
 export DISPLAY=:0
@@ -65,12 +68,24 @@ if [ "$CONDITION_ON_PREV" -eq 1 ]; then
     prev_action_args=(--num_prev_actions "$NUM_PREV_ACTIONS")
 fi
 
-echo "[run_inference_delay] env=$ENV query_freq=$QUERY_FREQ inference_delay=$INFERENCE_DELAY condition_on_prev=$CONDITION_ON_PREV num_prev_actions=$NUM_PREV_ACTIONS utd=$MULTI_GRAD_STEP seed=$SEED task_id=$TASK_ID"
+echo "[run_inference_delay] env=$ENV query_freq=$QUERY_FREQ inference_delay=$INFERENCE_DELAY rl_inference_delay=$RL_INFERENCE_DELAY condition_on_prev=$CONDITION_ON_PREV num_prev_actions=$NUM_PREV_ACTIONS utd=$MULTI_GRAD_STEP seed=$SEED task_id=$TASK_ID"
 echo "[run_inference_delay] extra args: $*"
 
 suffix="qf${QUERY_FREQ}_id${INFERENCE_DELAY}"
+if [ "$RL_INFERENCE_DELAY" -gt 0 ]; then
+    suffix="${suffix}_rld${RL_INFERENCE_DELAY}"
+fi
 if [ "$CONDITION_ON_PREV" -eq 1 ]; then
     suffix="${suffix}_pca"
+fi
+
+rl_delay_args=()
+if [ "$RL_INFERENCE_DELAY" -gt 0 ]; then
+    if [ "$RL_INFERENCE_DELAY" -ge "$INFERENCE_DELAY" ]; then
+        echo "DSRL_RL_INFERENCE_DELAY must be < inference_delay ($INFERENCE_DELAY)" >&2
+        exit 1
+    fi
+    rl_delay_args=(--rl_inference_delay "$RL_INFERENCE_DELAY")
 fi
 
 if [ "$ENV" = "libero" ]; then
@@ -109,6 +124,7 @@ python3 -m examples.launch_train_sim \
     --action_magnitude "$action_mag" \
     --query_freq "$QUERY_FREQ" \
     --inference_delay "$INFERENCE_DELAY" \
+    "${rl_delay_args[@]}" \
     --hidden_dims 128 \
     --seed "$SEED" \
     --multi_grad_step "$MULTI_GRAD_STEP" \

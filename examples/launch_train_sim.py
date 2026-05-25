@@ -31,6 +31,11 @@ if __name__ == '__main__':
                              'from step t; the first chunk plays indices 0..d-1, then '
                              'indices d+1..d+query_freq per query. 0 disables delay.',
                         type=int)
+    parser.add_argument('--rl_inference_delay', default=0,
+                        help='Additional SAC-only observation delay d'' < inference_delay. '
+                             'RL noise policy also sees s_{t-d''} (rl_pixels/rl_state) while '
+                             'pixels/state remain s_{t-d}. Requires 0 < d'' < d. 0 disables.',
+                        type=int)
     parser.add_argument('--num_prev_actions', default=0,
                         help='If > 0, SAC conditions on the last d pi0/pi05 actions '
                              'executed before each query (zero-padded at episode start). '

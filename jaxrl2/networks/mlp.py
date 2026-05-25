@@ -15,7 +15,7 @@ def _flatten_dict(x: Union[FrozenDict, jnp.ndarray]):
         for k, v in sorted(x.items()):
             # if k == "actions":
             #     v = v[:, 0:1, ...]
-            if k == 'state':  # flatten action chunk to 1D
+            if k in ('state', 'rl_state'):  # flatten proprio to 1D
                 obs.append(jnp.reshape(v, [*v.shape[:-2], np.prod(v.shape[-2:])]))
             elif k == 'prev_action':
                 # flatten all dims after batch (handles (B, d*action_dim, 1) or legacy (B, d, ad, 1))

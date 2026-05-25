@@ -45,36 +45,41 @@ def _update_jit(
     discount: float, tau: float, target_entropy: float,
     critic_reduction: str, color_jitter: bool, aug_next: bool, num_cameras: int,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str,float]]:
-    aug_pixels = batch['observations']['pixels']
-    aug_next_pixels = batch['next_observations']['pixels']
-    if batch['observations']['pixels'].squeeze().ndim != 2:
+    def _augment_pixels(pixels, rng):
+        if pixels.squeeze().ndim == 2:
+            return pixels, rng
         rng, key = jax.random.split(rng)
-        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
-
+        aug = batched_random_crop(key, pixels)
         if color_jitter:
             rng, key = jax.random.split(rng)
             if num_cameras > 1:
                 for i in range(num_cameras):
-                    aug_pixels = aug_pixels.at[:,:,:,i*3:(i+1)*3].set((color_transform(key, aug_pixels[:,:,:,i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8))
+                    aug = aug.at[:,:,:,i*3:(i+1)*3].set((color_transform(key, aug[:,:,:,i*3:(i+1)*3].astype(jnp.float32) / 255.) * 255).astype(jnp.uint8))
             else:
-                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                aug = (color_transform(key, aug.astype(jnp.float32) / 255.) * 255).astype(jnp.uint8)
+        return aug, rng
 
-    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
+    aug_pixels = batch['observations']['pixels']
+    aug_next_pixels = batch['next_observations']['pixels']
+    aug_pixels, rng = _augment_pixels(aug_pixels, rng)
+
+    obs_updates = {'pixels': aug_pixels}
+    if 'rl_pixels' in batch['observations']:
+        aug_rl_pixels, rng = _augment_pixels(batch['observations']['rl_pixels'], rng)
+        obs_updates['rl_pixels'] = aug_rl_pixels
+    observations = batch['observations'].copy(add_or_replace=obs_updates)
     batch = batch.copy(add_or_replace={'observations': observations})
 
     key, rng = jax.random.split(rng)
     if aug_next:
-        rng, key = jax.random.split(rng)
-        aug_next_pixels = batched_random_crop(key, batch['next_observations']['pixels'])
-        if color_jitter:
-            rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_next_pixels = aug_next_pixels.at[:,:,:,i*3:(i+1)*3].set((color_transform(key, aug_next_pixels[:,:,:,i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8))
-            else:
-                aug_next_pixels = (color_transform(key, aug_next_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-        next_observations = batch['next_observations'].copy(
-            add_or_replace={'pixels': aug_next_pixels})
+        aug_next_pixels, rng = _augment_pixels(batch['next_observations']['pixels'], rng)
+        next_updates = {'pixels': aug_next_pixels}
+        if 'rl_pixels' in batch['next_observations']:
+            aug_next_rl_pixels, rng = _augment_pixels(
+                batch['next_observations']['rl_pixels'], rng
+            )
+            next_updates['rl_pixels'] = aug_next_rl_pixels
+        next_observations = batch['next_observations'].copy(add_or_replace=next_updates)
         batch = batch.copy(add_or_replace={'next_observations': next_observations})
     
     key, rng = jax.random.split(rng)
@@ -264,13 +269,11 @@ class PixelSACLearner(Agent):
                 next_obs_pixels = next_observations['pixels'][t]
 
                 obs_dict = {'pixels': obs_pixels[None]}
+                if 'rl_pixels' in observations:
+                    obs_dict['rl_pixels'] = observations['rl_pixels'][t][None]
                 for k, v in observations.items():
-                    if 'pixels' not in k:
+                    if k not in ('pixels', 'rl_pixels'):
                         obs_dict[k] = v[t][None]
-                next_obs_dict = {'pixels': next_obs_pixels[None]}
-                for k, v in next_observations.items():
-                    if 'pixels' not in k:
-                        next_obs_dict[k] = v[t][None]
 
                 q_value = get_value(action, obs_dict, self._critic)
                 q_pred.append(q_value)
