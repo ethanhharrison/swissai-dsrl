@@ -88,9 +88,23 @@ def obs_to_qpos(obs, variant):
         raise NotImplementedError()
     return qpos
 
-
-def _inference_delay(variant):
-    return int(variant.get("inference_delay", 0))
+def _prev_action_obs(played_action_history, variant):
+    """Build prev_action observation from the last d executed pi0 actions."""
+    num_prev = variant.num_prev_actions
+    action_dim = variant.played_action_dim
+    if len(played_action_history) == 0:
+        hist = np.zeros((num_prev, action_dim), dtype=np.float32)
+    else:
+        recent = [np.asarray(a, dtype=np.float32).reshape(-1)[:action_dim]
+            for a in played_action_history[-num_prev:]]
+        if len(recent) < num_prev:
+            pad = [np.zeros(action_dim, dtype=np.float32)] * (num_prev - len(recent))
+            recent = pad + recent
+        hist = np.stack(recent, axis=0)
+    hist_flat = hist.reshape(-1).astype(np.float32)
+    return {
+        'prev_action': hist_flat[np.newaxis, :, np.newaxis],
+    }
 
 
 def _conditioning_timestep(t, inference_delay):
@@ -173,10 +187,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
             print('online buffer num traj:', traj_id + 1)
             print('total env steps:', total_env_steps)
             
-            if variant.get("num_online_gradsteps_batch", -1) > 0:
-                num_gradsteps = variant.num_online_gradsteps_batch
-            else:
-                num_gradsteps = len(traj["rewards"])*variant.multi_grad_step
+            num_gradsteps = len(traj["rewards"]) * variant.multi_grad_step
 
             if len(online_replay_buffer) > variant.start_online_updates:
                 for _ in range(num_gradsteps):
@@ -231,10 +242,7 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
       1. Collect `variant.iteration_size` trajectories into the replay buffer.
       2. Run exactly as many gradient steps as `trajwise_alternating_training_loop`
          would have run while interleaving over those trajectories, i.e.
-             `sum_over_collected_trajs(len(traj["rewards"])) * variant.multi_grad_step`
-         (or `variant.num_online_gradsteps_batch * iteration_size` when the
-         override is set, matching the "one batch == one traj" convention of
-         the interleaved loop).
+             `sum_over_collected_trajs(len(traj["rewards"])) * variant.multi_grad_step`.
       3. Return to (1); no env rollouts happen during the training phase.
 
     `len(traj["rewards"])` counts query steps (one entry per policy query),
@@ -256,7 +264,7 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
     assert iteration_size >= 1, \
         "iteration_size must be >= 1 for iteration_based_training_loop"
 
-    max_online_trajs = variant.get("max_online_trajs", 0)
+    max_online_trajs = variant.max_online_trajs
     limit_by_trajs = max_online_trajs > 0
 
     total_env_steps = 0
@@ -297,10 +305,7 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
             print(f'iteration env steps: {iter_env_steps} '
                   f'(query steps: {iter_query_steps})')
 
-            if variant.get("num_online_gradsteps_batch", -1) > 0:
-                num_gradsteps = variant.num_online_gradsteps_batch * iteration_size
-            else:
-                num_gradsteps = iter_query_steps * variant.multi_grad_step
+            num_gradsteps = iter_query_steps * variant.multi_grad_step
 
             if len(online_replay_buffer) <= variant.start_online_updates:
                 # Not enough data yet; keep collecting before doing any updates.
@@ -401,7 +406,8 @@ def _is_multitask_libero(env, variant):
 
 def collect_traj(variant, agent, env, i, agent_dp=None):
     query_frequency = variant.query_freq
-    inference_delay = _inference_delay(variant)
+    inference_delay = variant.inference_delay
+    num_prev_actions = variant.num_prev_actions
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
 
@@ -418,6 +424,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
     action_list = []
     obs_list = []
     raw_obs_history = []
+    played_action_history = []
     actions = None
 
     for t in tqdm(range(max_timesteps)):
@@ -429,6 +436,8 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
             cond_t = _conditioning_timestep(t, inference_delay)
             cond_obs = raw_obs_history[cond_t]
             obs_dict = _raw_obs_to_obs_dict(cond_obs, variant)
+            if num_prev_actions > 0:
+                obs_dict.update(_prev_action_obs(played_action_history, variant))
             actions, actions_noise, rng = _infer_action_chunk(
                 variant, agent, agent_dp, rng, obs_dict, cond_obs, i, False
             )
@@ -437,6 +446,8 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
 
         action_idx = _chunk_action_index(t, inference_delay, query_frequency)
         action_t = actions[action_idx]
+        if num_prev_actions > 0:
+            played_action_history.append(np.asarray(action_t, dtype=np.float32).reshape(-1))
         if 'libero' in variant.env:
             obs, reward, done, _ = env.step(action_t)
         elif 'aloha' in variant.env:
@@ -455,6 +466,8 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
         'pixels': curr_image[np.newaxis, ..., np.newaxis],
         'state': qpos[np.newaxis, ..., np.newaxis],
     }
+    if num_prev_actions > 0:
+        obs_dict.update(_prev_action_obs(played_action_history, variant))
     obs_list.append(obs_dict)
     image_list.append(curr_image)
     
@@ -491,7 +504,8 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
 def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
     """Single eval episode in the env's current task."""
     query_frequency = variant.query_freq
-    inference_delay = _inference_delay(variant)
+    inference_delay = variant.inference_delay
+    num_prev_actions = variant.num_prev_actions
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
 
@@ -505,6 +519,7 @@ def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
     rewards = []
     reward = 0
     raw_obs_history = []
+    played_action_history = []
     actions = None
 
     for t in tqdm(range(max_timesteps)):
@@ -516,12 +531,16 @@ def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
             cond_t = _conditioning_timestep(t, inference_delay)
             cond_obs = raw_obs_history[cond_t]
             obs_dict = _raw_obs_to_obs_dict(cond_obs, variant)
+            if num_prev_actions > 0:
+                obs_dict.update(_prev_action_obs(played_action_history, variant))
             actions, _, rng = _infer_action_chunk(
                 variant, agent, agent_dp, rng, obs_dict, cond_obs, i, True
             )
 
         action_idx = _chunk_action_index(t, inference_delay, query_frequency)
         action_t = actions[action_idx]
+        if num_prev_actions > 0:
+            played_action_history.append(np.asarray(action_t, dtype=np.float32).reshape(-1))
 
         if 'libero' in variant.env:
             obs, reward, done, _ = env.step(action_t)
@@ -545,7 +564,8 @@ def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
 
 def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
     print('query frequency', variant.query_freq)
-    print('inference delay', _inference_delay(variant))
+    print('inference delay', variant.inference_delay)
+    print('num prev actions', variant.num_prev_actions)
     env_max_reward = variant.env_max_reward
     rng = jax.random.PRNGKey(variant.seed + 456)
 

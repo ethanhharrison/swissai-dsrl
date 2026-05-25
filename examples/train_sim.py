@@ -88,6 +88,14 @@ class DummyEnv(gym.ObservationWrapper):
             elif variant.env == 'aloha_cube':
                 state_dim = 14
             obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
+        if variant.num_prev_actions > 0:
+            prev_action_dim = variant.num_prev_actions * int(variant.played_action_dim)
+            obs_dict['prev_action'] = Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(prev_action_dim, 1),
+                dtype=np.float32,
+            )
         self.observation_space = Dict(obs_dict)
         self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32) # 32 is the noise action space of pi 0
 
@@ -118,8 +126,8 @@ def main(variant):
     # baked into expname by create_exp_name (as --s-{seed}).
     _ablation_tag_parts = []
     if variant.env == "libero":
-        if variant.get("multi_task", 0):
-            multi_task_ids = _parse_task_ids(variant.get("task_ids", ""))
+        if variant.multi_task:
+            multi_task_ids = _parse_task_ids(variant.task_ids)
             if len(multi_task_ids) == 0:
                 raise ValueError(
                     "--multi_task=1 requires a non-empty --task_ids list"
@@ -133,7 +141,7 @@ def main(variant):
             _ablation_tag_parts.append(f"task{variant.task_id}")
         else:
             _ablation_tag_parts.append(f"task{variant.task_id}")
-    if variant.get("iteration_size", 0) and variant.iteration_size > 0:
+    if variant.iteration_size > 0:
         _ablation_tag_parts.append(f"iter{variant.iteration_size}")
     _ablation_tag_parts.append(f"utd{variant.multi_grad_step}")
     variant.prefix = f"{variant.prefix}_" + "_".join(_ablation_tag_parts)
@@ -152,7 +160,7 @@ def main(variant):
     if variant.env == 'libero':
         benchmark_dict = benchmark.get_benchmark_dict()
         task_suite = benchmark_dict["libero_90"]()
-        if variant.get("multi_task", 0):
+        if variant.multi_task:
             multi_task_ids = variant.multi_task_ids
             env = MultiTaskLiberoEnv(
                 task_suite=task_suite,
@@ -196,13 +204,6 @@ def main(variant):
     wandb_output_dir = tempfile.mkdtemp()
     wandb_logger = WandBLogger(variant.prefix != '', variant, variant.wandb_project, experiment_id=expname, output_dir=wandb_output_dir, group_name=group_name)
 
-    dummy_env = DummyEnv(variant)
-    sample_obs = add_batch_dim(dummy_env.observation_space.sample())
-    sample_action = add_batch_dim(dummy_env.action_space.sample())
-    print('sample obs shapes', [(k, v.shape) for k, v in sample_obs.items()])
-    print('sample action shape', sample_action.shape)
-    
-
     if variant.env == 'libero':
         config = openpi_config.get_config("pi05_libero")
         checkpoint_dir = download.maybe_download("gs://openpi-assets/checkpoints/pi05_libero")
@@ -218,6 +219,13 @@ def main(variant):
     # on variant so train_utils_sim can size the noise correctly.
     variant.action_horizon = config.model.action_horizon
     variant.action_dim = config.model.action_dim
+    # Executed pi0 action dim after policy output transforms (not padded model dim).
+    if variant.env == 'libero':
+        variant.played_action_dim = 7
+    elif variant.env == 'aloha_cube':
+        variant.played_action_dim = 14
+    else:
+        raise NotImplementedError()
     # The training loop calls actions[t % query_freq] on an action chunk of
     # length action_horizon, so query_freq must not exceed action_horizon.
     # pi0_aloha_sim has horizon 50 (query_freq up to 50 OK); pi05_libero has
@@ -227,18 +235,40 @@ def main(variant):
         f"--query_freq={variant.query_freq} exceeds the model's action_horizon "
         f"({variant.action_horizon}) for config '{variant.env}'. Lower --query_freq."
     )
-    inference_delay = int(variant.get("inference_delay", 0))
-    assert inference_delay >= 0, (
-        f"--inference_delay={inference_delay} must be non-negative."
+
+    assert variant.inference_delay >= 0, (
+        f"--inference_delay={variant.inference_delay} must be non-negative."
     )
-    if inference_delay > 0:
-        max_chunk_index = inference_delay + variant.query_freq
+    if variant.inference_delay > 0:
+        max_chunk_index = variant.inference_delay + variant.query_freq
         assert max_chunk_index < variant.action_horizon, (
-            f"--inference_delay={inference_delay} with --query_freq="
+            f"--inference_delay={variant.inference_delay} with --query_freq="
             f"{variant.query_freq} requires action chunk indices up to "
             f"{max_chunk_index}, but action_horizon is only "
             f"{variant.action_horizon}. Lower --inference_delay or --query_freq."
         )
+
+    assert variant.num_prev_actions >= 0, (
+        f"--num_prev_actions={variant.num_prev_actions} must be non-negative."
+    )
+    if variant.inference_delay == 0:
+        assert variant.num_prev_actions == 0, (
+            f"--num_prev_actions={variant.num_prev_actions} must be 0 when "
+            f"--inference_delay=0."
+        )
+    elif variant.num_prev_actions > 0:
+        assert variant.num_prev_actions == variant.inference_delay, (
+            f"--num_prev_actions={variant.num_prev_actions} must equal "
+            f"--inference_delay={variant.inference_delay} (condition on the "
+            f"last d played actions during the delay window)."
+        )
+
+    dummy_env = DummyEnv(variant)
+    sample_obs = add_batch_dim(dummy_env.observation_space.sample())
+    sample_action = add_batch_dim(dummy_env.action_space.sample())
+    print('sample obs shapes', [(k, v.shape) for k, v in sample_obs.items()])
+    print('sample action shape', sample_action.shape)
+
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi0 policy from %s", checkpoint_dir)
     agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs)
@@ -247,7 +277,7 @@ def main(variant):
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
-    if variant.get("iteration_size", 0) > 0:
+    if variant.iteration_size > 0:
         iteration_based_training_loop(variant, agent, env, eval_env,
                                       online_replay_buffer, replay_buffer, wandb_logger,
                                       shard_fn=shard_fn, agent_dp=agent_dp)

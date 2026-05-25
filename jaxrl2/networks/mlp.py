@@ -15,12 +15,13 @@ def _flatten_dict(x: Union[FrozenDict, jnp.ndarray]):
         for k, v in sorted(x.items()):
             # if k == "actions":
             #     v = v[:, 0:1, ...]
-            if k == 'state': # flatten action chunk to 1D
+            if k == 'state':  # flatten action chunk to 1D
                 obs.append(jnp.reshape(v, [*v.shape[:-2], np.prod(v.shape[-2:])]))
-                # v = jnp.reshape(v, [*v.shape[:-2], np.prod(v.shape[-2:])])
-            elif k == 'prev_action' or k == 'actions':
+            elif k == 'prev_action':
+                # flatten all dims after batch (handles (B, d*action_dim, 1) or legacy (B, d, ad, 1))
+                obs.append(jnp.reshape(v, (v.shape[0], -1)))
+            elif k == 'actions':
                 if v.ndim > 2:
-                    # deal with action chunk
                     obs.append(jnp.reshape(v, [*v.shape[:-2], np.prod(v.shape[-2:])]))
                 else:
                     obs.append(v)
@@ -35,8 +36,10 @@ def _flatten_dict_special(x):
         obs = []
         action = None
         for k, v in sorted(x.items()):
-            if k == 'state' or k == 'prev_action':
+            if k == 'state':
                 obs.append(jnp.reshape(v, [*v.shape[:-2], np.prod(v.shape[-2:])]))
+            elif k == 'prev_action':
+                obs.append(jnp.reshape(v, (v.shape[0], -1)))
             elif k == 'actions':
                 print ('action shape: ', v.shape)
                 action = v

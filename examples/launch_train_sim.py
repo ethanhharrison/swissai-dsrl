@@ -31,6 +31,11 @@ if __name__ == '__main__':
                              'from step t; the first chunk plays indices 0..d-1, then '
                              'indices d+1..d+query_freq per query. 0 disables delay.',
                         type=int)
+    parser.add_argument('--num_prev_actions', default=0,
+                        help='If > 0, SAC conditions on the last d pi0/pi05 actions '
+                             'executed before each query (zero-padded at episode start). '
+                             'Must equal --inference_delay. 0 disables.',
+                        type=int)
     parser.add_argument('--task_id', default=2,
                         help='LIBERO task id within the libero_90 benchmark '
                              '(0-89). Ignored when --multi_task=1.',

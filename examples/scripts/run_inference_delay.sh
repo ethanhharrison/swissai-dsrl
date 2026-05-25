@@ -4,9 +4,14 @@
 # Usage:
 #   run_inference_delay.sh <env> <query_freq> <inference_delay> <multi_grad_step> <seed> [task_id] [extra args...]
 #
+# Optional env:
+#   DSRL_CONDITION_ON_PREV_ACTIONS  If 1, pass --num_prev_actions equal to
+#                                   inference_delay (last d played actions). Default: 0.
+#
 # Examples:
 #   run_inference_delay.sh libero 5 2 20 0 28 --max_online_trajs 5000
 #   run_inference_delay.sh aloha_cube 25 10 20 1
+#   DSRL_CONDITION_ON_PREV_ACTIONS=1 run_inference_delay.sh aloha_cube 25 10 20 1
 set -euo pipefail
 
 if [ "$#" -lt 5 ]; then
@@ -28,6 +33,7 @@ if [ "$#" -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
 fi
 
 proj_name=${DSRL_WANDB_PROJECT:-DSRL_pi0_InferenceDelay}
+CONDITION_ON_PREV=${DSRL_CONDITION_ON_PREV_ACTIONS:-0}
 device_id=${CUDA_VISIBLE_DEVICES:-0}
 
 export DISPLAY=:0
@@ -48,8 +54,24 @@ mkdir -p "$OPENPI_DATA_HOME" "$HF_HOME" "$TORCH_HOME" "$JAX_COMPILATION_CACHE_DI
 export EXP=$DSRL_SCRATCH/logs/$proj_name
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-echo "[run_inference_delay] env=$ENV query_freq=$QUERY_FREQ inference_delay=$INFERENCE_DELAY utd=$MULTI_GRAD_STEP seed=$SEED task_id=$TASK_ID"
+NUM_PREV_ACTIONS=0
+prev_action_args=()
+if [ "$CONDITION_ON_PREV" -eq 1 ]; then
+    if [ "$INFERENCE_DELAY" -le 0 ]; then
+        echo "DSRL_CONDITION_ON_PREV_ACTIONS=1 requires inference_delay > 0" >&2
+        exit 1
+    fi
+    NUM_PREV_ACTIONS=$INFERENCE_DELAY
+    prev_action_args=(--num_prev_actions "$NUM_PREV_ACTIONS")
+fi
+
+echo "[run_inference_delay] env=$ENV query_freq=$QUERY_FREQ inference_delay=$INFERENCE_DELAY condition_on_prev=$CONDITION_ON_PREV num_prev_actions=$NUM_PREV_ACTIONS utd=$MULTI_GRAD_STEP seed=$SEED task_id=$TASK_ID"
 echo "[run_inference_delay] extra args: $*"
+
+suffix="qf${QUERY_FREQ}_id${INFERENCE_DELAY}"
+if [ "$CONDITION_ON_PREV" -eq 1 ]; then
+    suffix="${suffix}_pca"
+fi
 
 if [ "$ENV" = "libero" ]; then
     prefix=dsrl_pi0_libero
@@ -74,7 +96,7 @@ python3 -m examples.launch_train_sim \
     --algorithm pixel_sac \
     --env "$ENV" \
     --prefix "$prefix" \
-    --suffix "qf${QUERY_FREQ}_id${INFERENCE_DELAY}" \
+    --suffix "$suffix" \
     --wandb_project "${proj_name}" \
     --batch_size 256 \
     --discount 0.999 \
@@ -92,4 +114,5 @@ python3 -m examples.launch_train_sim \
     --multi_grad_step "$MULTI_GRAD_STEP" \
     --iteration_size "$iteration_size" \
     "${libero_extra[@]}" \
-    "$@"
+    "$@" \
+    "${prev_action_args[@]}"
