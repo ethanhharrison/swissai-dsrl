@@ -118,7 +118,7 @@ python3 -m examples.launch_train_sim \
     --max_steps "$max_steps" \
     --eval_interval 10000 \
     --log_interval 500 \
-    --eval_episodes 10 \
+    --eval_episodes 50 \
     --start_online_updates "$start_online" \
     --resize_image 64 \
     --action_magnitude "$action_mag" \

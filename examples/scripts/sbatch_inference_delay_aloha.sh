@@ -11,19 +11,24 @@
 # Optional env overrides:
 #   DSRL_CONDITION_ON_PREV_LIST     Comma-separated 0/1, e.g. "0,1"
 #   DSRL_RL_INFERENCE_DELAY_LIST    Comma-separated delays, e.g. "0,5,10"
+#   DSRL_JOBS_PER_GPU               Pack N ablations per slurm GPU job (default: 1).
+#                                   Runs execute in parallel (& wait); each ablation
+#                                   also writes logs to slurm_logs/<job_name>.<jobid>.out.
 #
-# Total jobs: n_delays * n_rl_delays * n_seeds * n_condition_on_prev
+# Total ablations: n_delays * n_rl_delays * n_seeds * n_condition_on_prev
 # (pairs with rl_delay >= inference_delay are skipped)
 #
 # Submit from repo root:
 #   bash examples/scripts/sbatch_inference_delay_aloha.sh
+#   DSRL_JOBS_PER_GPU=2 bash examples/scripts/sbatch_inference_delay_aloha.sh
 set -euo pipefail
 
 REPO=/global/home/users/ehharrison/dsrl_pi0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$REPO/slurm_logs"
 
 DELAYS=(20)
-SEEDS=(0 1 2)
+SEEDS=(3 4 5)
 # Prev-action conditioning: 1 sets --num_prev_actions = inference_delay for that job.
 CONDITION_ON_PREV=(0 1)
 if [ -n "${DSRL_CONDITION_ON_PREV_LIST:-}" ]; then
@@ -36,7 +41,7 @@ if [ -n "${DSRL_RL_INFERENCE_DELAY_LIST:-}" ]; then
 fi
 QUERY_FREQ=25
 MULTI_GRAD_STEP=${DSRL_MULTI_GRAD_STEP:-25}
-WANDB_PROJECT=${DSRL_WANDB_PROJECT:-DSRL_pi0_InferenceDelay_Aloha}
+WANDB_PROJECT=${DSRL_WANDB_PROJECT:-DSRL_pi0_InferenceDelay_Aloha_Full}
 MAX_ONLINE_TRAJS=${DSRL_MAX_ONLINE_TRAJS:-5000}
 
 CONDA_SETUP='source /global/home/users/ehharrison/miniconda3/etc/profile.d/conda.sh && conda activate dsrl_pi0'
@@ -54,7 +59,10 @@ SBATCH_BASE=(
     --parsable
 )
 
-job_idx=0
+WRAP_CMDS=()
+JOB_NAMES=()
+LOG_BASES=()
+
 for delay in "${DELAYS[@]}"; do
     for rl_delay in "${RL_INFERENCE_DELAYS[@]}"; do
         if [ "$rl_delay" -gt 0 ] && [ "$rl_delay" -ge "$delay" ]; then
@@ -73,16 +81,14 @@ for delay in "${DELAYS[@]}"; do
                 log_base="$REPO/slurm_logs/${job_name}"
                 wrap_cmd="${CONDA_SETUP} && cd ${REPO} && DSRL_WANDB_PROJECT=${WANDB_PROJECT} DSRL_CONDITION_ON_PREV_ACTIONS=${cond_prev} DSRL_RL_INFERENCE_DELAY=${rl_delay} bash ${REPO}/examples/scripts/run_inference_delay.sh aloha_cube ${QUERY_FREQ} ${delay} ${MULTI_GRAD_STEP} ${seed} --max_online_trajs ${MAX_ONLINE_TRAJS}"
 
-                jobid=$(sbatch "${SBATCH_BASE[@]}" \
-                    -J "$job_name" \
-                    -o "${log_base}.%j.out" \
-                    -e "${log_base}.%j.err" \
-                    --wrap "$wrap_cmd")
-                echo "submitted job ${job_idx}  ${jobid}  (${job_name})"
-                job_idx=$((job_idx + 1))
+                WRAP_CMDS+=("$wrap_cmd")
+                JOB_NAMES+=("$job_name")
+                LOG_BASES+=("$log_base")
             done
         done
     done
 done
 
-echo "Done: submitted ${job_idx} ALOHA inference-delay jobs."
+# shellcheck source=examples/scripts/sbatch_inference_delay_submit.sh
+source "${SCRIPT_DIR}/sbatch_inference_delay_submit.sh"
+submit_inference_delay_sweep

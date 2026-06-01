@@ -12,15 +12,20 @@
 # Optional env overrides:
 #   DSRL_CONDITION_ON_PREV_LIST     Comma-separated 0/1, e.g. "0,1"
 #   DSRL_RL_INFERENCE_DELAY_LIST    Comma-separated delays, e.g. "0,1,2"
+#   DSRL_JOBS_PER_GPU               Pack N ablations per slurm GPU job (default: 1).
+#                                   Runs execute in parallel (& wait); each ablation
+#                                   also writes logs to slurm_logs/<job_name>.<jobid>.out.
 #
-# Total jobs: n_tasks * n_delays * n_rl_delays * n_seeds * n_condition_on_prev
+# Total ablations: n_tasks * n_delays * n_rl_delays * n_seeds * n_condition_on_prev
 # (pairs with rl_delay >= inference_delay are skipped)
 #
 # Submit from repo root:
 #   bash examples/scripts/sbatch_inference_delay_libero.sh
+#   DSRL_JOBS_PER_GPU=3 bash examples/scripts/sbatch_inference_delay_libero.sh
 set -euo pipefail
 
 REPO=/global/home/users/ehharrison/dsrl_pi0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$REPO/slurm_logs"
 
 TASKS=(2 14 28 38 59 60)
@@ -55,7 +60,10 @@ SBATCH_BASE=(
     --parsable
 )
 
-job_idx=0
+WRAP_CMDS=()
+JOB_NAMES=()
+LOG_BASES=()
+
 for task in "${TASKS[@]}"; do
     for delay in "${DELAYS[@]}"; do
         for rl_delay in "${RL_INFERENCE_DELAYS[@]}"; do
@@ -75,17 +83,15 @@ for task in "${TASKS[@]}"; do
                     log_base="$REPO/slurm_logs/${job_name}"
                     wrap_cmd="${CONDA_SETUP} && cd ${REPO} && DSRL_WANDB_PROJECT=${WANDB_PROJECT} DSRL_CONDITION_ON_PREV_ACTIONS=${cond_prev} DSRL_RL_INFERENCE_DELAY=${rl_delay} bash ${REPO}/examples/scripts/run_inference_delay.sh libero ${QUERY_FREQ} ${delay} ${MULTI_GRAD_STEP} ${seed} ${task} --max_online_trajs ${MAX_ONLINE_TRAJS}"
 
-                    jobid=$(sbatch "${SBATCH_BASE[@]}" \
-                        -J "$job_name" \
-                        -o "${log_base}.%j.out" \
-                        -e "${log_base}.%j.err" \
-                        --wrap "$wrap_cmd")
-                    echo "submitted job ${job_idx}  ${jobid}  (${job_name})"
-                    job_idx=$((job_idx + 1))
+                    WRAP_CMDS+=("$wrap_cmd")
+                    JOB_NAMES+=("$job_name")
+                    LOG_BASES+=("$log_base")
                 done
             done
         done
     done
 done
 
-echo "Done: submitted ${job_idx} LIBERO inference-delay jobs."
+# shellcheck source=examples/scripts/sbatch_inference_delay_submit.sh
+source "${SCRIPT_DIR}/sbatch_inference_delay_submit.sh"
+submit_inference_delay_sweep
