@@ -486,7 +486,6 @@ def _collect_traj_residual_step(variant, agent, env, i, agent_dp=None):
     raw_obs_history = []
     played_action_history = []
     base_full_chunk = None
-    base_executed = None
 
     for t in tqdm(range(max_timesteps)):
         raw_obs_history.append(obs)
@@ -497,19 +496,18 @@ def _collect_traj_residual_step(variant, agent, env, i, agent_dp=None):
             cond_t = _conditioning_timestep(t, inference_delay)
             cond_obs = raw_obs_history[cond_t]
             base_full_chunk, rng = _infer_base_pi_chunk(variant, agent_dp, rng, cond_obs)
-            base_executed = extract_executed_chunk(base_full_chunk, variant, t)
 
-        local_step = chunk_local_step(t, query_frequency)
+        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
+        base_action = np.asarray(base_full_chunk[action_idx], dtype=np.float32).reshape(-1)[:played_dim]
+
         sac_obs = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
-        sac_obs = obs_with_residual_context(sac_obs, base_executed, query_frequency, local_step=local_step)
+        sac_obs = obs_with_residual_context(sac_obs, base_action)
 
         if i == 0:
             edit = np.zeros((1, played_dim), dtype=np.float32)
         else:
             edit = np.asarray(agent.sample_actions(sac_obs), dtype=np.float32).reshape(1, played_dim)
 
-        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
-        base_action = np.asarray(base_full_chunk[action_idx], dtype=np.float32).reshape(-1)[:played_dim]
         action_t = base_action + edit.reshape(-1)[:played_dim]
 
         action_list.append(edit)
@@ -530,9 +528,10 @@ def _collect_traj_residual_step(variant, agent, env, i, agent_dp=None):
 
     terminal_t = t
     terminal_sac_obs = _build_sac_obs_dict(terminal_t, raw_obs_history, played_action_history, variant)
-    if base_executed is not None:
-        terminal_local = chunk_local_step(terminal_t, query_frequency)
-        terminal_sac_obs = obs_with_residual_context(terminal_sac_obs, base_executed, query_frequency, local_step=terminal_local)
+    if base_full_chunk is not None:
+        terminal_action_idx = _chunk_action_index(terminal_t, inference_delay, query_frequency)
+        terminal_base_action = np.asarray(base_full_chunk[terminal_action_idx], dtype=np.float32).reshape(-1)[:played_dim]
+        terminal_sac_obs = obs_with_residual_context(terminal_sac_obs, terminal_base_action)
     obs_list.append(terminal_sac_obs)
     image_list.append(curr_image)
 
@@ -608,7 +607,7 @@ def _collect_traj_residual_chunk(variant, agent, env, i, agent_dp=None):
             base_executed = extract_executed_chunk(base_full_chunk, variant, t)
 
             sac_obs = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
-            sac_obs = obs_with_residual_context(sac_obs, base_executed, query_frequency, chunk_level=True)
+            sac_obs = obs_with_residual_context(sac_obs, base_executed, chunk_level=True)
 
             if i == 0:
                 edit_chunk = np.zeros((query_frequency, played_dim), dtype=np.float32)
@@ -639,7 +638,7 @@ def _collect_traj_residual_chunk(variant, agent, env, i, agent_dp=None):
 
     obs_dict = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
     if base_executed is not None:
-        obs_dict = obs_with_residual_context(obs_dict, base_executed, query_frequency, chunk_level=True)
+        obs_dict = obs_with_residual_context(obs_dict, base_executed, chunk_level=True)
     obs_list.append(obs_dict)
     image_list.append(curr_image)
 
@@ -791,7 +790,6 @@ def _run_eval_rollout_residual_step(agent, env, i, variant, agent_dp, rng):
     raw_obs_history = []
     played_action_history = []
     base_full_chunk = None
-    base_executed = None
 
     for t in tqdm(range(max_timesteps)):
         raw_obs_history.append(obs)
@@ -802,19 +800,18 @@ def _run_eval_rollout_residual_step(agent, env, i, variant, agent_dp, rng):
             cond_t = _conditioning_timestep(t, inference_delay)
             cond_obs = raw_obs_history[cond_t]
             base_full_chunk, rng = _infer_base_pi_chunk(variant, agent_dp, rng, cond_obs)
-            base_executed = extract_executed_chunk(base_full_chunk, variant, t)
 
-        local_step = chunk_local_step(t, query_frequency)
+        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
+        base_action = np.asarray(base_full_chunk[action_idx], dtype=np.float32).reshape(-1)[:played_dim]
+
         sac_obs = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
-        sac_obs = obs_with_residual_context(sac_obs, base_executed, query_frequency, local_step=local_step)
+        sac_obs = obs_with_residual_context(sac_obs, base_action)
 
         if i == 0:
             edit = np.zeros((1, played_dim), dtype=np.float32)
         else:
             edit = np.asarray(agent.sample_actions(sac_obs), dtype=np.float32).reshape(1, played_dim)
 
-        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
-        base_action = np.asarray(base_full_chunk[action_idx], dtype=np.float32).reshape(-1)[:played_dim]
         action_t = base_action + edit.reshape(-1)[:played_dim]
 
         if num_prev_actions > 0:
@@ -874,7 +871,7 @@ def _run_eval_rollout_residual_chunk(agent, env, i, variant, agent_dp, rng):
             base_executed = extract_executed_chunk(base_full_chunk, variant, t)
 
             sac_obs = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
-            sac_obs = obs_with_residual_context(sac_obs, base_executed, query_frequency, chunk_level=True)
+            sac_obs = obs_with_residual_context(sac_obs, base_executed, chunk_level=True)
 
             if i == 0:
                 edit_chunk = np.zeros((query_frequency, played_dim), dtype=np.float32)

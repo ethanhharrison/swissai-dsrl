@@ -1,7 +1,11 @@
 """Utilities for residual RL: pi0 base chunks + SAC action edits."""
-from typing import Dict
+from typing import Dict, Tuple
 
+import jax.numpy as jnp
 import numpy as np
+from flax.core.frozen_dict import FrozenDict, freeze
+
+_RESIDUAL_CRITIC_DROP_KEYS = frozenset({'base_action', 'chunk_step'})
 
 
 def chunk_action_index(t, inference_delay, query_freq):
@@ -34,28 +38,25 @@ def extract_executed_chunk(full_chunk, variant, query_step: int) -> np.ndarray:
     return np.asarray(full_chunk, dtype=np.float32)[idx]
 
 
-def chunk_step_onehot(local_step: int, query_freq: int) -> np.ndarray:
-    """One-hot vector of length ``query_freq`` for the current chunk timestep."""
-    onehot = np.zeros((query_freq, 1), dtype=np.float32)
-    onehot[local_step, 0] = 1.0
-    return onehot
-
-
 def obs_with_residual_context(
         obs_dict: Dict,
-        base_executed_chunk: np.ndarray,
-        query_freq: int,
-        local_step: int = 0,
+        base_action,
         chunk_level: bool = False,
 ) -> Dict:
-    """Attach base executed chunk; optionally chunk-step one-hot (per-step edit mode)."""
+    """Attach pi0 base action context for residual SAC.
+
+    Step mode (chunk_level=False): single current base action, shape (action_dim,).
+    Chunk mode (chunk_level=True): executed base chunk, shape (query_freq, action_dim).
+    """
     obs = {k: v for k, v in obs_dict.items() if k not in ('base_action', 'chunk_step')}
-    base = np.asarray(base_executed_chunk, dtype=np.float32)
-    if base.ndim != 2:
-        raise ValueError(f"base_executed_chunk must be shape (query_freq, action_dim), got {base.shape}")
-    obs['base_action'] = base.reshape(1, *base.shape, 1)
-    if not chunk_level:
-        obs['chunk_step'] = chunk_step_onehot(local_step, query_freq).reshape(1, query_freq, 1)
+    base = np.asarray(base_action, dtype=np.float32)
+    if chunk_level:
+        if base.ndim != 2:
+            raise ValueError(f"chunk-level base_action must be shape (query_freq, action_dim), got {base.shape}")
+        obs['base_action'] = base.reshape(1, *base.shape, 1)
+    else:
+        base = base.reshape(-1)
+        obs['base_action'] = base.reshape(1, base.shape[0], 1)
     return obs
 
 
@@ -67,3 +68,32 @@ def residual_edit_shape(variant) -> tuple:
 def is_chunk_level_residual(variant) -> bool:
     return variant.policy_mode == 'residual' and variant.residual_edit_mode == 'chunk'
 
+
+def obs_without_base_action(obs) -> Dict:
+    """Drop residual-only keys so the critic sees the original SAC state."""
+    if isinstance(obs, FrozenDict):
+        return freeze({k: v for k, v in obs.items() if k not in _RESIDUAL_CRITIC_DROP_KEYS})
+    return {k: v for k, v in obs.items() if k not in _RESIDUAL_CRITIC_DROP_KEYS}
+
+
+def residual_resulting_action(base_action, edit_action):
+    """Return executed action = base + edit for step- or chunk-level residual."""
+    base = jnp.asarray(base_action)
+    edit = jnp.asarray(edit_action)
+    if base.ndim == 3:
+        # Step mode: (B, action_dim, 1) + (B, 1, action_dim).
+        base = base[..., 0]
+        if edit.ndim == 3:
+            return base[:, None, :] + edit
+        return base + edit
+    if base.ndim == 4:
+        # Chunk mode: (B, query_freq, action_dim, 1) + (B, query_freq, action_dim).
+        return base[..., 0] + edit
+    raise ValueError(f"Unexpected base_action shape: {base.shape}")
+
+
+def prepare_critic_batch(obs, edit_action, policy_mode: str) -> Tuple:
+    """Map actor batch to critic inputs for residual policy."""
+    if policy_mode != 'residual':
+        return obs, edit_action
+    return obs_without_base_action(obs), residual_resulting_action(obs['base_action'], edit_action)

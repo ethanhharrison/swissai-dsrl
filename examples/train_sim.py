@@ -101,11 +101,12 @@ class DummyEnv(gym.ObservationWrapper):
                 dtype=np.float32,
             )
         if variant.policy_mode == 'residual':
-            exec_steps = int(variant.query_freq)
             played_dim = int(variant.played_action_dim)
-            obs_dict['base_action'] = Box(low=-np.inf, high=np.inf, shape=(exec_steps, played_dim, 1), dtype=np.float32)
-            if variant.residual_edit_mode != 'chunk':
-                obs_dict['chunk_step'] = Box(low=0.0, high=1.0, shape=(exec_steps, 1), dtype=np.float32)
+            if variant.residual_edit_mode == 'chunk':
+                exec_steps = int(variant.query_freq)
+                obs_dict['base_action'] = Box(low=-np.inf, high=np.inf, shape=(exec_steps, played_dim, 1), dtype=np.float32)
+            else:
+                obs_dict['base_action'] = Box(low=-np.inf, high=np.inf, shape=(played_dim, 1), dtype=np.float32)
         self.observation_space = Dict(obs_dict)
         if variant.policy_mode == 'residual':
             played_dim = int(variant.played_action_dim)

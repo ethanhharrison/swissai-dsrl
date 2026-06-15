@@ -9,8 +9,12 @@ from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.types import Params, PRNGKey
 
 
+from jaxrl2.agents.pixel_sac.residual import prepare_critic_batch
+
+
 def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
-                 temp: TrainState, batch: DatasetDict, cross_norm:bool=False, critic_reduction:str='min') -> Tuple[TrainState, Dict[str, float]]:
+                 temp: TrainState, batch: DatasetDict, cross_norm:bool=False, critic_reduction:str='min',
+                 policy_mode: str = 'dsrl') -> Tuple[TrainState, Dict[str, float]]:
     
     key, key_act = jax.random.split(key, num=2)
 
@@ -38,11 +42,12 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
         
         actions, log_probs = dist.sample_and_log_prob(seed=key_act)
 
+        critic_obs, critic_actions = prepare_critic_batch(batch['observations'], actions, policy_mode)
         if hasattr(critic, 'batch_stats') and critic.batch_stats is not None:
-            qs, _ = critic.apply_fn({'params': critic.params, 'batch_stats': critic.batch_stats}, batch['observations'],
-                            actions, mutable=['batch_stats'])
+            qs, _ = critic.apply_fn({'params': critic.params, 'batch_stats': critic.batch_stats}, critic_obs,
+                            critic_actions, mutable=['batch_stats'])
         else:    
-            qs = critic.apply_fn({'params': critic.params}, batch['observations'], actions)
+            qs = critic.apply_fn({'params': critic.params}, critic_obs, critic_actions)
         
         if critic_reduction == 'min':
             q = qs.min(axis=0)
