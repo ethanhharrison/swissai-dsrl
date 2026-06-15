@@ -60,14 +60,14 @@ python3 -m examples.launch_train_sim \
     --suffix "$suffix" \
     --wandb_project "${proj_name}" \
     --policy_mode residual \
-    --residual_edit_mode step \
+    --residual_edit_mode chunk \
     --batch_size 256 \
     --discount 0.999 \
     --max_steps 3000000 \
     --eval_interval 10000 \
     --log_interval 500 \
     --eval_episodes 10 \
-    --start_online_updates 25000 \
+    --start_online_updates 1000 \
     --resize_image 64 \
     --action_magnitude 0.05 \
     --query_freq "$QUERY_FREQ" \
