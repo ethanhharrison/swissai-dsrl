@@ -128,7 +128,8 @@ class PixelSACLearner(Agent):
                  num_qs: int = 2,
                  target_entropy: float = None,
                  action_magnitude: float = 1.0,
-                 num_cameras: int = 1
+                 num_cameras: int = 1,
+                 policy_mode: str = 'dsrl',
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -137,6 +138,7 @@ class PixelSACLearner(Agent):
         self.aug_next=aug_next
         self.color_jitter = color_jitter
         self.num_cameras = num_cameras
+        self.policy_mode = policy_mode
 
         self.action_dim = np.prod(actions.shape[-2:])
         self.action_chunk_shape = actions.shape[-2:]

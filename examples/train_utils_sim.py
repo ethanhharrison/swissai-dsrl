@@ -6,6 +6,13 @@ from openpi_client import image_tools
 import math
 import PIL
 
+from jaxrl2.agents.pixel_sac.residual import (
+    chunk_local_step,
+    extract_executed_chunk,
+    is_chunk_level_residual,
+    obs_with_residual_context,
+)
+
 def _quat2axisangle(quat):
     """
     Copied from robosuite: https://github.com/ARISE-Initiative/robosuite/blob/eafb81f54ffc104f905ee48a16bb15f059176ad3/robosuite/utils/transform_utils.py#L490C1-L512C55
@@ -163,6 +170,15 @@ def _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant):
     return obs_dict
 
 
+def _infer_base_pi_chunk(variant, agent_dp, rng, raw_obs):
+    """Sample a pi0 action chunk (base policy, no SAC steering)."""
+    rng, key = jax.random.split(rng)
+    obs_pi_zero = obs_to_pi_zero_input(raw_obs, variant)
+    noise = jax.random.normal(key, (1, variant.action_horizon, variant.action_dim))
+    actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+    return actions, rng
+
+
 def _infer_action_chunk(variant, agent, agent_dp, rng, obs_dict, raw_obs, i, is_eval):
     """Run pi0 inference and return (actions, actions_noise, updated_rng)."""
     rng, key = jax.random.split(rng)
@@ -272,9 +288,9 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
              `sum_over_collected_trajs(len(traj["rewards"])) * variant.multi_grad_step`.
       3. Return to (1); no env rollouts happen during the training phase.
 
-    `len(traj["rewards"])` counts query steps (one entry per policy query),
-    not raw env steps, so the total gradient-step budget matches the
-    interleaved loop exactly for the same stream of trajectories.
+    `len(traj["rewards"])` counts query steps for DSRL and chunk-level residual
+    (one entry per policy query), or env steps for per-step residual, after
+    sparse reward assignment.
 
     Termination criterion:
       * If `variant.max_online_trajs > 0`, the outer loop stops once at least
@@ -387,7 +403,12 @@ def iteration_based_training_loop(variant, agent, env, eval_env, online_replay_b
 
 def add_online_data_to_buffer(variant, traj, online_replay_buffer):
 
-    discount_horizon = variant.query_freq
+    if is_chunk_level_residual(variant):
+        discount_horizon = variant.query_freq
+    elif variant.policy_mode == 'residual':
+        discount_horizon = 1
+    else:
+        discount_horizon = variant.query_freq
     actions = np.array(traj['actions']) # (T, chunk_size, action_dim )
     episode_len = len(actions)
     rewards = np.array(traj['rewards'])
@@ -434,6 +455,226 @@ def _is_multitask_libero(env, variant):
 
 
 def collect_traj(variant, agent, env, i, agent_dp=None):
+    if variant.policy_mode == 'residual':
+        if is_chunk_level_residual(variant):
+            return _collect_traj_residual_chunk(variant, agent, env, i, agent_dp)
+        return _collect_traj_residual_step(variant, agent, env, i, agent_dp)
+    return _collect_traj_dsrl(variant, agent, env, i, agent_dp)
+
+
+def _collect_traj_residual_step(variant, agent, env, i, agent_dp=None):
+    """Collect a trajectory with per-step residual edits on pi0 base actions."""
+    query_frequency = variant.query_freq
+    inference_delay = variant.inference_delay
+    num_prev_actions = variant.num_prev_actions
+    max_timesteps = variant.max_timesteps
+    env_max_reward = variant.env_max_reward
+    played_dim = variant.played_action_dim
+
+    agent._rng, rng = jax.random.split(agent._rng)
+
+    if 'libero' in variant.env:
+        obs = env.reset()
+        _maybe_sync_task_description(env, variant)
+    elif 'aloha' in variant.env:
+        obs, _ = env.reset()
+
+    image_list = []
+    rewards = []
+    action_list = []
+    obs_list = []
+    raw_obs_history = []
+    played_action_history = []
+    base_full_chunk = None
+    base_executed = None
+
+    for t in tqdm(range(max_timesteps)):
+        raw_obs_history.append(obs)
+        curr_image = obs_to_img(obs, variant)
+
+        if t % query_frequency == 0:
+            assert agent_dp is not None
+            cond_t = _conditioning_timestep(t, inference_delay)
+            cond_obs = raw_obs_history[cond_t]
+            base_full_chunk, rng = _infer_base_pi_chunk(variant, agent_dp, rng, cond_obs)
+            base_executed = extract_executed_chunk(base_full_chunk, variant, t)
+
+        local_step = chunk_local_step(t, query_frequency)
+        sac_obs = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
+        sac_obs = obs_with_residual_context(sac_obs, base_executed, query_frequency, local_step=local_step)
+
+        if i == 0:
+            edit = np.zeros((1, played_dim), dtype=np.float32)
+        else:
+            edit = np.asarray(agent.sample_actions(sac_obs), dtype=np.float32).reshape(1, played_dim)
+
+        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
+        base_action = np.asarray(base_full_chunk[action_idx], dtype=np.float32).reshape(-1)[:played_dim]
+        action_t = base_action + edit.reshape(-1)[:played_dim]
+
+        action_list.append(edit)
+        obs_list.append(sac_obs)
+        if num_prev_actions > 0:
+            played_action_history.append(base_action.copy())
+
+        if 'libero' in variant.env:
+            obs, reward, done, _ = env.step(action_t)
+        elif 'aloha' in variant.env:
+            obs, reward, terminated, truncated, _ = env.step(action_t)
+            done = terminated or truncated
+
+        rewards.append(reward)
+        image_list.append(curr_image)
+        if done:
+            break
+
+    terminal_t = t
+    terminal_sac_obs = _build_sac_obs_dict(terminal_t, raw_obs_history, played_action_history, variant)
+    if base_executed is not None:
+        terminal_local = chunk_local_step(terminal_t, query_frequency)
+        terminal_sac_obs = obs_with_residual_context(terminal_sac_obs, base_executed, query_frequency, local_step=terminal_local)
+    obs_list.append(terminal_sac_obs)
+    image_list.append(curr_image)
+
+    env_steps = terminal_t + 1
+    rewards = np.array(rewards, dtype=np.float32)
+    episode_return = float(np.sum(rewards))
+    is_success = (reward == env_max_reward)
+
+    '''
+    Sparse -1/0 for SAC training. Scale by 1/query_freq so per-step Q targets
+    match DSRL's query-step sparse returns (~O(-query_steps), not O(-env_steps)).
+    '''
+    step_penalty = -1.0 / query_frequency
+    if is_success:
+        rewards = np.full(env_steps - 1, step_penalty, dtype=np.float32)
+        rewards = np.concatenate([rewards, [0.0]])
+        masks = np.concatenate([np.ones(env_steps - 1), [0.0]])
+    else:
+        rewards = np.full(env_steps, step_penalty, dtype=np.float32)
+        masks = np.ones(env_steps, dtype=np.float32)
+
+    print(f'Rollout Done: episode_return={episode_return}, Success: {is_success}')
+
+    agent._rng = rng
+    return {
+        'observations': obs_list,
+        'actions': action_list,
+        'rewards': rewards,
+        'masks': masks,
+        'is_success': is_success,
+        'episode_return': episode_return,
+        'images': image_list,
+        'env_steps': env_steps,
+    }
+
+
+def _collect_traj_residual_chunk(variant, agent, env, i, agent_dp=None):
+    """Collect a trajectory with chunk-level residual edits on pi0 base actions."""
+    query_frequency = variant.query_freq
+    inference_delay = variant.inference_delay
+    num_prev_actions = variant.num_prev_actions
+    max_timesteps = variant.max_timesteps
+    env_max_reward = variant.env_max_reward
+    played_dim = variant.played_action_dim
+
+    agent._rng, rng = jax.random.split(agent._rng)
+
+    if 'libero' in variant.env:
+        obs = env.reset()
+        _maybe_sync_task_description(env, variant)
+    elif 'aloha' in variant.env:
+        obs, _ = env.reset()
+
+    image_list = []
+    rewards = []
+    action_list = []
+    obs_list = []
+    raw_obs_history = []
+    played_action_history = []
+    base_full_chunk = None
+    base_executed = None
+    edit_chunk = None
+
+    for t in tqdm(range(max_timesteps)):
+        raw_obs_history.append(obs)
+        curr_image = obs_to_img(obs, variant)
+
+        if t % query_frequency == 0:
+            assert agent_dp is not None
+            cond_t = _conditioning_timestep(t, inference_delay)
+            cond_obs = raw_obs_history[cond_t]
+            base_full_chunk, rng = _infer_base_pi_chunk(variant, agent_dp, rng, cond_obs)
+            base_executed = extract_executed_chunk(base_full_chunk, variant, t)
+
+            sac_obs = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
+            sac_obs = obs_with_residual_context(sac_obs, base_executed, query_frequency, chunk_level=True)
+
+            if i == 0:
+                edit_chunk = np.zeros((query_frequency, played_dim), dtype=np.float32)
+            else:
+                edit_chunk = np.asarray(agent.sample_actions(sac_obs), dtype=np.float32).reshape(query_frequency, played_dim)
+
+            action_list.append(edit_chunk)
+            obs_list.append(sac_obs)
+
+        local_step = chunk_local_step(t, query_frequency)
+        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
+        base_action = np.asarray(base_full_chunk[action_idx], dtype=np.float32).reshape(-1)[:played_dim]
+        action_t = base_action + edit_chunk[local_step]
+
+        if num_prev_actions > 0:
+            played_action_history.append(base_action.copy())
+
+        if 'libero' in variant.env:
+            obs, reward, done, _ = env.step(action_t)
+        elif 'aloha' in variant.env:
+            obs, reward, terminated, truncated, _ = env.step(action_t)
+            done = terminated or truncated
+
+        rewards.append(reward)
+        image_list.append(curr_image)
+        if done:
+            break
+
+    obs_dict = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
+    if base_executed is not None:
+        obs_dict = obs_with_residual_context(obs_dict, base_executed, query_frequency, chunk_level=True)
+    obs_list.append(obs_dict)
+    image_list.append(curr_image)
+
+    rewards = np.array(rewards)
+    episode_return = float(np.sum(rewards))
+    is_success = (reward == env_max_reward)
+
+    '''
+    Query-step sparse -1/0 rewards (same as DSRL).
+    '''
+    if is_success:
+        query_steps = len(action_list)
+        rewards = np.concatenate([-np.ones(query_steps - 1), [0]])
+        masks = np.concatenate([np.ones(query_steps - 1), [0]])
+    else:
+        query_steps = len(action_list)
+        rewards = -np.ones(query_steps)
+        masks = np.ones(query_steps)
+
+    print(f'Rollout Done: episode_return={episode_return}, Success: {is_success}')
+
+    agent._rng = rng
+    return {
+        'observations': obs_list,
+        'actions': action_list,
+        'rewards': rewards,
+        'masks': masks,
+        'is_success': is_success,
+        'episode_return': episode_return,
+        'images': image_list,
+        'env_steps': t + 1,
+    }
+
+
+def _collect_traj_dsrl(variant, agent, env, i, agent_dp=None):
     query_frequency = variant.query_freq
     inference_delay = variant.inference_delay
     num_prev_actions = variant.num_prev_actions
@@ -523,6 +764,155 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
 
 def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
     """Single eval episode in the env's current task."""
+    if variant.policy_mode == 'residual':
+        if is_chunk_level_residual(variant):
+            return _run_eval_rollout_residual_chunk(agent, env, i, variant, agent_dp, rng)
+        return _run_eval_rollout_residual_step(agent, env, i, variant, agent_dp, rng)
+    return _run_eval_rollout_dsrl(agent, env, i, variant, agent_dp, rng)
+
+
+def _run_eval_rollout_residual_step(agent, env, i, variant, agent_dp, rng):
+    query_frequency = variant.query_freq
+    inference_delay = variant.inference_delay
+    num_prev_actions = variant.num_prev_actions
+    max_timesteps = variant.max_timesteps
+    env_max_reward = variant.env_max_reward
+    played_dim = variant.played_action_dim
+
+    if 'libero' in variant.env:
+        obs = env.reset()
+        _maybe_sync_task_description(env, variant)
+    elif 'aloha' in variant.env:
+        obs, _ = env.reset()
+
+    image_list = []
+    rewards = []
+    reward = 0
+    raw_obs_history = []
+    played_action_history = []
+    base_full_chunk = None
+    base_executed = None
+
+    for t in tqdm(range(max_timesteps)):
+        raw_obs_history.append(obs)
+        curr_image = obs_to_img(obs, variant)
+
+        if t % query_frequency == 0:
+            assert agent_dp is not None
+            cond_t = _conditioning_timestep(t, inference_delay)
+            cond_obs = raw_obs_history[cond_t]
+            base_full_chunk, rng = _infer_base_pi_chunk(variant, agent_dp, rng, cond_obs)
+            base_executed = extract_executed_chunk(base_full_chunk, variant, t)
+
+        local_step = chunk_local_step(t, query_frequency)
+        sac_obs = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
+        sac_obs = obs_with_residual_context(sac_obs, base_executed, query_frequency, local_step=local_step)
+
+        if i == 0:
+            edit = np.zeros((1, played_dim), dtype=np.float32)
+        else:
+            edit = np.asarray(agent.sample_actions(sac_obs), dtype=np.float32).reshape(1, played_dim)
+
+        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
+        base_action = np.asarray(base_full_chunk[action_idx], dtype=np.float32).reshape(-1)[:played_dim]
+        action_t = base_action + edit.reshape(-1)[:played_dim]
+
+        if num_prev_actions > 0:
+            played_action_history.append(base_action.copy())
+
+        if 'libero' in variant.env:
+            obs, reward, done, _ = env.step(action_t)
+        elif 'aloha' in variant.env:
+            obs, reward, terminated, truncated, _ = env.step(action_t)
+            done = terminated or truncated
+
+        rewards.append(reward)
+        image_list.append(curr_image)
+        if done:
+            break
+
+    rewards_arr = np.array(rewards)
+    episode_return = float(np.sum(rewards_arr))
+    episode_highest_reward = (
+        float(np.max(rewards_arr)) if rewards_arr.size > 0 else 0.0
+    )
+    is_success = bool(reward == env_max_reward)
+    return episode_return, episode_highest_reward, is_success, t + 1, image_list, rng
+
+
+def _run_eval_rollout_residual_chunk(agent, env, i, variant, agent_dp, rng):
+    query_frequency = variant.query_freq
+    inference_delay = variant.inference_delay
+    num_prev_actions = variant.num_prev_actions
+    max_timesteps = variant.max_timesteps
+    env_max_reward = variant.env_max_reward
+    played_dim = variant.played_action_dim
+
+    if 'libero' in variant.env:
+        obs = env.reset()
+        _maybe_sync_task_description(env, variant)
+    elif 'aloha' in variant.env:
+        obs, _ = env.reset()
+
+    image_list = []
+    rewards = []
+    reward = 0
+    raw_obs_history = []
+    played_action_history = []
+    base_full_chunk = None
+    edit_chunk = None
+
+    for t in tqdm(range(max_timesteps)):
+        raw_obs_history.append(obs)
+        curr_image = obs_to_img(obs, variant)
+
+        if t % query_frequency == 0:
+            assert agent_dp is not None
+            cond_t = _conditioning_timestep(t, inference_delay)
+            cond_obs = raw_obs_history[cond_t]
+            base_full_chunk, rng = _infer_base_pi_chunk(variant, agent_dp, rng, cond_obs)
+            base_executed = extract_executed_chunk(base_full_chunk, variant, t)
+
+            sac_obs = _build_sac_obs_dict(t, raw_obs_history, played_action_history, variant)
+            sac_obs = obs_with_residual_context(sac_obs, base_executed, query_frequency, chunk_level=True)
+
+            if i == 0:
+                edit_chunk = np.zeros((query_frequency, played_dim), dtype=np.float32)
+            else:
+                edit_chunk = np.asarray(
+                    agent.sample_actions(sac_obs), dtype=np.float32
+                ).reshape(query_frequency, played_dim)
+
+        local_step = chunk_local_step(t, query_frequency)
+        action_idx = _chunk_action_index(t, inference_delay, query_frequency)
+        base_action = np.asarray(base_full_chunk[action_idx], dtype=np.float32).reshape(-1)[:played_dim]
+        action_t = base_action + edit_chunk[local_step]
+
+        if num_prev_actions > 0:
+            played_action_history.append(base_action.copy())
+
+        if 'libero' in variant.env:
+            obs, reward, done, _ = env.step(action_t)
+        elif 'aloha' in variant.env:
+            obs, reward, terminated, truncated, _ = env.step(action_t)
+            done = terminated or truncated
+
+        rewards.append(reward)
+        image_list.append(curr_image)
+        if done:
+            break
+
+    rewards_arr = np.array(rewards)
+    episode_return = float(np.sum(rewards_arr))
+    episode_highest_reward = (
+        float(np.max(rewards_arr)) if rewards_arr.size > 0 else 0.0
+    )
+    is_success = bool(reward == env_max_reward)
+    return episode_return, episode_highest_reward, is_success, t + 1, image_list, rng
+
+
+def _run_eval_rollout_dsrl(agent, env, i, variant, agent_dp, rng):
+    """Single eval episode in the env's current task."""
     query_frequency = variant.query_freq
     inference_delay = variant.inference_delay
     num_prev_actions = variant.num_prev_actions
@@ -581,6 +971,9 @@ def _run_eval_rollout(agent, env, i, variant, agent_dp, rng):
 
 
 def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
+    print('policy mode', variant.policy_mode)
+    if variant.policy_mode == 'residual':
+        print('residual edit mode', variant.residual_edit_mode)
     print('query frequency', variant.query_freq)
     print('inference delay', variant.inference_delay)
     print('rl inference delay', variant.rl_inference_delay)

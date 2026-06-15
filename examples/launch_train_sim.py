@@ -61,6 +61,16 @@ if __name__ == '__main__':
                              'again. If 0 (default), use the standard '
                              'trajwise_alternating_training_loop.',
                         type=int)
+    parser.add_argument('--policy_mode', default='dsrl',
+                        help="Policy training mode: 'dsrl' (SAC steers pi0 noise) "
+                             "or 'residual' (SAC outputs edits on pi0 actions).",
+                        type=str)
+    parser.add_argument('--residual_edit_mode', default='step',
+                        help="For --policy_mode=residual: 'step' outputs one edit per "
+                             "env step; 'chunk' outputs edits for all actions played "
+                             "in the query interval at once.",
+                        type=str)
+    
     parser.add_argument('--max_online_trajs', default=0,
                         help='Only used by iteration_based_training_loop. If '
                              '> 0, the outer loop terminates once at least '
@@ -91,6 +101,7 @@ if __name__ == '__main__':
         use_spatial_softmax=True,
         softmax_temperature=-1,
         target_entropy='auto',
+        init_temperature=1.0,
         num_qs=10,
         action_magnitude=1.0,
         num_cameras=1,

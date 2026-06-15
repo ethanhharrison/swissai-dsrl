@@ -100,8 +100,22 @@ class DummyEnv(gym.ObservationWrapper):
                 shape=(prev_action_dim, 1),
                 dtype=np.float32,
             )
+        if variant.policy_mode == 'residual':
+            exec_steps = int(variant.query_freq)
+            played_dim = int(variant.played_action_dim)
+            obs_dict['base_action'] = Box(low=-np.inf, high=np.inf, shape=(exec_steps, played_dim, 1), dtype=np.float32)
+            if variant.residual_edit_mode != 'chunk':
+                obs_dict['chunk_step'] = Box(low=0.0, high=1.0, shape=(exec_steps, 1), dtype=np.float32)
         self.observation_space = Dict(obs_dict)
-        self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32) # 32 is the noise action space of pi 0
+        if variant.policy_mode == 'residual':
+            played_dim = int(variant.played_action_dim)
+            if variant.residual_edit_mode == 'chunk':
+                exec_steps = int(variant.query_freq)
+                self.action_space = Box(low=-1, high=1, shape=(exec_steps, played_dim,), dtype=np.float32)
+            else:
+                self.action_space = Box(low=-1, high=1, shape=(1, played_dim,), dtype=np.float32)
+        else:
+            self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32)
 
 
 def main(variant):
@@ -290,9 +304,24 @@ def main(variant):
     print('sample obs shapes', [(k, v.shape) for k, v in sample_obs.items()])
     print('sample action shape', sample_action.shape)
 
+    assert variant.policy_mode in ('dsrl', 'residual'), (
+        f"--policy_mode must be 'dsrl' or 'residual', got {variant.policy_mode!r}."
+    )
+    if variant.policy_mode == 'residual':
+        assert variant.residual_edit_mode in ('step', 'chunk'), (
+            f"--residual_edit_mode must be 'step' or 'chunk', "
+            f"got {variant.residual_edit_mode!r}."
+        )
+
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi0 policy from %s", checkpoint_dir)
-    agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs)
+    agent = PixelSACLearner(
+        variant.seed,
+        sample_obs,
+        sample_action,
+        policy_mode=variant.policy_mode,
+        **kwargs,
+    )
 
     online_buffer_size = variant.max_steps  // variant.multi_grad_step
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))
