@@ -10,10 +10,7 @@
 ## Overview
 This repository provides the official implementation for our paper: [Steering Your Diffusion Policy with Latent Space Reinforcement Learning](https://arxiv.org/abs/2506.15799) (CoRL 2025).
 
-Specifically, it contains a JAX-based implementation of DSRL (Diffusion Steering via Reinforcement Learning) for steering a pre-trained generalist policy, [π₀](https://github.com/Physical-Intelligence/openpi), across various environments, including:
-
-- **Simulation:** Libero, Aloha  
-- **Real Robot:** Franka
+Specifically, it contains a JAX-based implementation of DSRL (Diffusion Steering via Reinforcement Learning) for steering a pre-trained generalist policy, [π₀](https://github.com/Physical-Intelligence/openpi), on **Libero90 multi-task** simulation environments.
 
 If you find this repository useful for your research, please cite:
 
@@ -116,32 +113,18 @@ If you're hitting quota even before training starts, the usual offenders in
 - `~/miniconda3` — move the whole install to scratch and re-symlink, or install miniconda directly to scratch next time
 - `~/.local/lib/python3.11/site-packages` — stale user-site packages; safe to archive to scratch once `PYTHONNOUSERSITE=1` is in place
 
-## Training (Simulation)
-Libero
+## Training (Libero90 Multi-Task)
+Set the task ids and launch training:
 ```
-bash examples/scripts/run_libero.sh
+DSRL_MULTI_TASK_IDS=28,29,30,31,32 bash examples/scripts/run_libero_multitask.sh 20 0
 ```
-Aloha
+Or submit Slurm jobs (Savio):
 ```
-bash examples/scripts/run_aloha.sh
+bash sbatch_multitask_28-32_all.sh
+bash sbatch_multitask_28-79-44-59-43_all.sh
 ```
 ### Training Logs
 We provide sample W&B runs and logs: https://wandb.ai/mitsuhiko/DSRL_pi0_public
-
-## Training (Real)
-For real-world experiments, we use the remote hosting feature from pi0 (see [here](https://github.com/Physical-Intelligence/openpi/blob/main/docs/remote_inference.md)) which enables us to host the pi0 model on a higher-spec remote server, in case the robot's client machine is not powerful enough. 
-
-0. Setup Franka robot and install DROID package [[link](https://github.com/droid-dataset/droid.git)]
-
-1. [On the remote server] Host pi0 droid model on your remote server
-```
-cd openpi && python scripts/serve_policy.py --env=DROID
-```
-2. [On your robot client machine] Run DSRL
-```
-bash examples/scripts/run_real.sh
-```
-
 
 ## Credits
 This repository is built upon [jaxrl2](https://github.com/ikostrikov/jaxrl2) and [PTR](https://github.com/Asap7772/PTR) repositories. 

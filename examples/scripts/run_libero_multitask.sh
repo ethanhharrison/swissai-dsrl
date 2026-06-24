@@ -1,26 +1,27 @@
 #!/bin/bash
-# Wrapper used by launch_ablation.py for BRC sbatch jobs.
-# Usage: run_ablation.sh <iteration_size> <multi_grad_step> <seed>
-# Any extra arguments ($4+) are forwarded verbatim to launch_train_sim.
+# Launch Libero90 multi-task DSRL training.
+# Usage: run_libero_multitask.sh <multi_grad_step> <seed> [extra args...]
+#
+# Set task ids via DSRL_MULTI_TASK_IDS, e.g.:
+#   DSRL_MULTI_TASK_IDS=28,29,30,31,32 bash examples/scripts/run_libero_multitask.sh 20 0
 set -euo pipefail
 
-if [ "$#" -lt 3 ]; then
-    echo "Usage: $0 <iteration_size> <multi_grad_step> <seed> [task_id] [extra args...]" >&2
+if [ "$#" -lt 2 ]; then
+    echo "Usage: $0 <multi_grad_step> <seed> [extra args...]" >&2
     exit 1
 fi
 
-ITER_SIZE=$1
-MULTI_GRAD_STEP=$2
-SEED=$3
-shift 3
-TASK_ID=${TASK_ID:-2}
-# Optional 4th positional arg overrides $TASK_ID.
-if [ "$#" -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
-    TASK_ID=$1
-    shift 1
+MULTI_GRAD_STEP=$1
+SEED=$2
+shift 2
+
+MULTI_TASK_IDS=${DSRL_MULTI_TASK_IDS:-}
+if [ -z "$MULTI_TASK_IDS" ]; then
+    echo "DSRL_MULTI_TASK_IDS must be set (comma-separated libero_90 task ids)" >&2
+    exit 1
 fi
 
-proj_name=${DSRL_WANDB_PROJECT:-DSRL_pi0_Libero_Ablation}
+proj_name=${DSRL_WANDB_PROJECT:-DSRL_pi0_Libero_MultiTask}
 device_id=${CUDA_VISIBLE_DEVICES:-0}
 
 export DISPLAY=:0
@@ -28,7 +29,6 @@ export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
 export MUJOCO_EGL_DEVICE_ID=$device_id
 
-# Redirect big caches to scratch (same as run_libero.sh).
 : "${DSRL_SCRATCH:=/global/scratch/users/$USER}"
 export OPENPI_DATA_HOME=$DSRL_SCRATCH/openpi_cache
 export HF_HOME=$DSRL_SCRATCH/hf_cache
@@ -42,20 +42,11 @@ mkdir -p "$OPENPI_DATA_HOME" "$HF_HOME" "$TORCH_HOME" "$JAX_COMPILATION_CACHE_DI
 export EXP=$DSRL_SCRATCH/logs/$proj_name
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-MULTI_TASK_IDS=${DSRL_MULTI_TASK_IDS:-}
-echo "[run_ablation] iter_size=$ITER_SIZE utd=$MULTI_GRAD_STEP seed=$SEED task_id=$TASK_ID multi_task_ids=${MULTI_TASK_IDS:-<unset>}"
-echo "[run_ablation] extra args: $*"
-
-libero_extra=()
-if [ -n "$MULTI_TASK_IDS" ]; then
-    libero_extra+=("--multi_task" "1" "--task_ids" "$MULTI_TASK_IDS")
-else
-    libero_extra+=("--task_id" "$TASK_ID")
-fi
+echo "[run_libero_multitask] utd=$MULTI_GRAD_STEP seed=$SEED task_ids=$MULTI_TASK_IDS"
+echo "[run_libero_multitask] extra args: $*"
 
 python3 -m examples.launch_train_sim \
     --algorithm pixel_sac \
-    --env libero \
     --prefix dsrl_pi0_libero \
     --wandb_project "${proj_name}" \
     --batch_size 256 \
@@ -71,6 +62,5 @@ python3 -m examples.launch_train_sim \
     --hidden_dims 128 \
     --seed "$SEED" \
     --multi_grad_step "$MULTI_GRAD_STEP" \
-    --iteration_size "$ITER_SIZE" \
-    "${libero_extra[@]}" \
+    --task_ids "$MULTI_TASK_IDS" \
     "$@"

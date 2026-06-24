@@ -27,7 +27,6 @@ from jaxrl2.networks.encoders.resnet_encoderv2 import ResNetV2Encoder
 from jaxrl2.agents.pixel_sac.actor_updater import update_actor
 from jaxrl2.agents.pixel_sac.critic_updater import update_critic
 from jaxrl2.agents.pixel_sac.temperature_updater import update_temperature
-from jaxrl2.agents.pixel_sac.residual import prepare_critic_batch
 from jaxrl2.agents.pixel_sac.temperature import Temperature
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.networks.learned_std_normal_policy import LearnedStdTanhNormalPolicy
@@ -39,13 +38,12 @@ from jaxrl2.utils.target_update import soft_target_update
 class TrainState(train_state.TrainState):
     batch_stats: Any
 
-@functools.partial(jax.jit, static_argnames=('critic_reduction', 'color_jitter',  'aug_next', 'num_cameras', 'policy_mode'))
+@functools.partial(jax.jit, static_argnames=('critic_reduction', 'color_jitter',  'aug_next', 'num_cameras'))
 def _update_jit(
     rng: PRNGKey, actor: TrainState, critic: TrainState,
     target_critic_params: Params, temp: TrainState, batch: TrainState,
     discount: float, tau: float, target_entropy: float,
     critic_reduction: str, color_jitter: bool, aug_next: bool, num_cameras: int,
-    policy_mode: str,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str,float]]:
     def _augment_pixels(pixels, rng):
         if pixels.squeeze().ndim == 2:
@@ -86,11 +84,11 @@ def _update_jit(
     
     key, rng = jax.random.split(rng)
     target_critic = critic.replace(params=target_critic_params)
-    new_critic, critic_info = update_critic(key, actor, critic, target_critic, temp, batch, discount, critic_reduction=critic_reduction, policy_mode=policy_mode)
+    new_critic, critic_info = update_critic(key, actor, critic, target_critic, temp, batch, discount, critic_reduction=critic_reduction)
     new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
-    
+
     key, rng = jax.random.split(rng)
-    new_actor, actor_info = update_actor(key, actor, new_critic, temp, batch, critic_reduction=critic_reduction, policy_mode=policy_mode)
+    new_actor, actor_info = update_actor(key, actor, new_critic, temp, batch, critic_reduction=critic_reduction)
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
 
     return rng, new_actor, new_critic, new_target_critic_params, new_temp, {
@@ -131,7 +129,6 @@ class PixelSACLearner(Agent):
                  target_entropy: float = None,
                  action_magnitude: float = 1.0,
                  num_cameras: int = 1,
-                 policy_mode: str = 'dsrl',
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -140,7 +137,6 @@ class PixelSACLearner(Agent):
         self.aug_next=aug_next
         self.color_jitter = color_jitter
         self.num_cameras = num_cameras
-        self.policy_mode = policy_mode
 
         self.action_dim = np.prod(actions.shape[-2:])
         self.action_chunk_shape = actions.shape[-2:]
@@ -205,12 +201,7 @@ class PixelSACLearner(Agent):
                                       use_bottleneck=use_bottleneck
                                       )
         print(critic_def)
-        if policy_mode == 'residual':
-            critic_observations, critic_actions = prepare_critic_batch(observations, actions, policy_mode)
-        else:
-            critic_observations = observations
-            critic_actions = actions
-        critic_def_init = critic_def.init(critic_key, critic_observations, critic_actions)
+        critic_def_init = critic_def.init(critic_key, observations, actions)
         self._critic_init_params = critic_def_init['params']
 
         critic_params = critic_def_init['params']
@@ -245,7 +236,7 @@ class PixelSACLearner(Agent):
 
     def update(self, batch: FrozenDict) -> Dict[str, float]:
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(
-            self._rng, self._actor, self._critic, self._target_critic_params, self._temp, batch, self.discount, self.tau, self.target_entropy, self.critic_reduction, self.color_jitter, self.aug_next, self.num_cameras, self.policy_mode
+            self._rng, self._actor, self._critic, self._target_critic_params, self._temp, batch, self.discount, self.tau, self.target_entropy, self.critic_reduction, self.color_jitter, self.aug_next, self.num_cameras
             )
 
         self._rng = new_rng
@@ -273,19 +264,14 @@ class PixelSACLearner(Agent):
             q_pred = []
 
             for t in range(0, len(actions)):
-                edit = actions[t][None]
                 obs_pixels = observations['pixels'][t]
-                next_obs_pixels = next_observations['pixels'][t]
 
                 obs_dict = {'pixels': obs_pixels[None]}
-                if 'rl_pixels' in observations:
-                    obs_dict['rl_pixels'] = observations['rl_pixels'][t][None]
                 for k, v in observations.items():
-                    if k not in ('pixels', 'rl_pixels'):
+                    if k != 'pixels':
                         obs_dict[k] = v[t][None]
 
-                critic_obs, critic_action = prepare_critic_batch(obs_dict, edit, self.policy_mode)
-                q_value = get_value(critic_action, critic_obs, self._critic)
+                q_value = get_value(actions[t][None], obs_dict, self._critic)
                 q_pred.append(q_value)
 
             traj_images.append(make_visual(q_pred, rewards, masks, observations['pixels']))

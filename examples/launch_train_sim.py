@@ -9,8 +9,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--seed', default=42, help='Random seed.', type=int)
     parser.add_argument('--launch_group_id', default='', help='group id used to group runs on wandb.')
-    parser.add_argument('--eval_episodes', default=10,help='Number of episodes used for evaluation.', type=int)
-    parser.add_argument('--env', default='libero', help='name of environment')
+    parser.add_argument('--eval_episodes', default=10, help='Number of episodes used for evaluation.', type=int)
     parser.add_argument('--log_interval', default=1000, help='Logging interval.', type=int)
     parser.add_argument('--eval_interval', default=5000, help='Eval interval.', type=int)
     parser.add_argument('--checkpoint_interval', default=-1, help='checkpoint interval.', type=int)
@@ -25,62 +24,8 @@ if __name__ == '__main__':
     parser.add_argument('--multi_grad_step', default=1, help='Number of graident steps to take per environment step, aka UTD', type=int)
     parser.add_argument('--resize_image', default=-1, help='the size of image if need resizing', type=int)
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
-    parser.add_argument('--inference_delay', default=0,
-                        help='Artificial inference delay (env steps) during rollouts. '
-                             'At step t+d the policy is conditioned on the observation '
-                             'from step t; the first chunk plays indices 0..d-1, then '
-                             'indices d+1..d+query_freq per query. 0 disables delay.',
-                        type=int)
-    parser.add_argument('--rl_inference_delay', default=0,
-                        help='Additional SAC-only observation delay d'' < inference_delay. '
-                             'RL noise policy also sees s_{t-d''} (rl_pixels/rl_state) while '
-                             'pixels/state remain s_{t-d}. Requires 0 < d'' < d. 0 disables.',
-                        type=int)
-    parser.add_argument('--num_prev_actions', default=0,
-                        help='If > 0, SAC conditions on the last d pi0/pi05 actions '
-                             'executed before each query (zero-padded at episode start). '
-                             'Must equal --inference_delay. 0 disables.',
-                        type=int)
-    parser.add_argument('--task_id', default=2,
-                        help='LIBERO task id within the libero_90 benchmark '
-                             '(0-89). Ignored when --multi_task=1.',
-                        type=int)
-    parser.add_argument('--multi_task', default=0,
-                        help='If 1, use MultiTaskLiberoEnv and sample from '
-                             '--task_ids on each env.reset().',
-                        type=int)
-    parser.add_argument('--task_ids', default='',
-                        help='Comma- or space-separated libero_90 task ids '
-                             'for --multi_task=1 (e.g. "28,29,30,31,32").',
-                        type=str)
-    parser.add_argument('--iteration_size', default=0,
-                        help='If > 0, use iteration_based_training_loop: '
-                             'collect this many trajectories, then do all the '
-                             'gradient updates the interleaved loop would have '
-                             'done over those trajectories before collecting '
-                             'again. If 0 (default), use the standard '
-                             'trajwise_alternating_training_loop.',
-                        type=int)
-    parser.add_argument('--policy_mode', default='dsrl',
-                        help="Policy training mode: 'dsrl' (SAC steers pi0 noise) "
-                             "or 'residual' (SAC outputs edits on pi0 actions).",
-                        type=str)
-    parser.add_argument('--residual_edit_mode', default='step',
-                        help="For --policy_mode=residual: 'step' outputs one edit per "
-                             "env step; 'chunk' outputs edits for all actions played "
-                             "in the query interval at once.",
-                        type=str)
-    
-    parser.add_argument('--max_online_trajs', default=0,
-                        help='Only used by iteration_based_training_loop. If '
-                             '> 0, the outer loop terminates once at least '
-                             'this many trajectories have been collected '
-                             '(the training phase following the final '
-                             'collection still runs to completion). If 0 '
-                             '(default), termination is governed by '
-                             '--max_steps gradient updates as before.',
-                        type=int)
-    
+    parser.add_argument('--task_ids', default='', help='Comma- or space-separated libero_90 task ids (e.g. "28,29,30,31,32").', type=str)
+
     train_args_dict = dict(
         actor_lr=1e-4,
         critic_lr= 3e-4,
@@ -111,4 +56,3 @@ if __name__ == '__main__':
     print(variant)
     main(variant)
     sys.exit()
-    
