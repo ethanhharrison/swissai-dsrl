@@ -67,7 +67,7 @@ python3 -m examples.launch_train_sim \
     --eval_interval 10000 \
     --log_interval 500 \
     --eval_episodes 10 \
-    --start_online_updates 1000 \
+    --start_online_updates 25000 \
     --resize_image 64 \
     --action_magnitude 0.05 \
     --query_freq "$QUERY_FREQ" \

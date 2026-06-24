@@ -39,12 +39,12 @@ REPO="${DSRL_REPO:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 mkdir -p "$REPO/slurm_logs"
 
 QUERY_FREQ=${DSRL_QUERY_FREQ:-25}
-MULTI_GRAD_STEP=${DSRL_MULTI_GRAD_STEP:-25}
-WANDB_PROJECT=${DSRL_WANDB_PROJECT:-DSRL_pi0_Residual_Aloha}
+MULTI_GRAD_STEP=${DSRL_MULTI_GRAD_STEP:-1}
+WANDB_PROJECT=${DSRL_WANDB_PROJECT:-ARLI_pi0_Residual_Aloha}
 MAX_ONLINE_TRAJS=${DSRL_MAX_ONLINE_TRAJS:-0}
-CONDA_SETUP="${DSRL_CONDA_SETUP:-source /global/home/users/ehharrison/miniconda3/etc/profile.d/conda.sh && conda activate dsrl_pi0}"
+CONDA_SETUP="${DSRL_CONDA_SETUP:-source /global/home/users/ehharrison/miniconda3/etc/profile.d/conda.sh && conda activate arli}"
 
-RESIDUAL_EDIT_MODES=(chunk)
+RESIDUAL_EDIT_MODES=(step)
 if [ -n "${DSRL_RESIDUAL_EDIT_MODE_LIST:-}" ]; then
     IFS=',' read -ra RESIDUAL_EDIT_MODES <<< "${DSRL_RESIDUAL_EDIT_MODE_LIST}"
 fi
@@ -74,12 +74,12 @@ if [ -n "${DSRL_TEMP_MODE_LIST:-}" ]; then
     IFS=',' read -ra TEMP_MODES <<< "${DSRL_TEMP_MODE_LIST}"
 fi
 
-SEEDS=(0 1)
+SEEDS=(1 2)
 if [ -n "${DSRL_SEED_LIST:-}" ]; then
     IFS=',' read -ra SEEDS <<< "${DSRL_SEED_LIST}"
 fi
 
-INIT_TEMPERATURE="${DSRL_INIT_TEMPERATURE:-}"
+INIT_TEMPERATURE="${DSRL_INIT_TEMPERATURE:-0.2}"
 TARGET_ENTROPY="${DSRL_TARGET_ENTROPY:-auto}"
 
 SBATCH_BASE=(
