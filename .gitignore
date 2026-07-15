@@ -130,3 +130,4 @@ wandb_config.py
 logs/
 wandb/
 slurm_logs/
+LIBERO/.libero/

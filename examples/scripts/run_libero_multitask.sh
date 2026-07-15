@@ -42,6 +42,10 @@ mkdir -p "$OPENPI_DATA_HOME" "$HF_HOME" "$TORCH_HOME" "$JAX_COMPILATION_CACHE_DI
 export EXP=$DSRL_SCRATCH/logs/$proj_name
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export LIBERO_CONFIG_PATH="$REPO_ROOT/LIBERO/.libero"
+mkdir -p "$LIBERO_CONFIG_PATH"
+
 echo "[run_libero_multitask] utd=$MULTI_GRAD_STEP seed=$SEED task_ids=$MULTI_TASK_IDS"
 echo "[run_libero_multitask] extra args: $*"
 

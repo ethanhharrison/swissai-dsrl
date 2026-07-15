@@ -1,11 +1,12 @@
 #! /usr/bin/env python
 import os
-# Tell XLA to use Triton GEMM, this improves steps/sec by ~30% on some GPUs from https://github.com/huggingface/gym-aloha/tree/main?tab=readme-ov-file#-gpu-rendering-egl
+# Tell XLA to use Triton GEMM, this improves steps/sec by ~30% on some GPUs
 xla_flags = os.environ.get('XLA_FLAGS', '')
 xla_flags += ' --xla_gpu_triton_gemm_any=True'
 os.environ['XLA_FLAGS'] = xla_flags
 
-import pathlib
+from examples.libero_paths import ensure_libero_paths
+ensure_libero_paths()
 
 import jax
 from jaxrl2.agents.pixel_sac.pixel_sac_learner import PixelSACLearner
@@ -16,8 +17,6 @@ import gymnasium as gym
 from gym.spaces import Dict, Box
 
 from libero.libero import benchmark
-from libero.libero import get_libero_path
-from libero.libero.envs import OffScreenRenderEnv
 
 from jaxrl2.data import ReplayBuffer
 from jaxrl2.utils.wandb_logger import WandBLogger, create_exp_name
@@ -37,6 +36,7 @@ _jax_cache_dir = os.environ.get(
     os.path.join(os.environ["HOME"], "jax_compilation_cache"),
 )
 compilation_cache.initialize_cache(_jax_cache_dir)
+
 
 def _parse_task_ids(task_ids_arg):
     if task_ids_arg is None:

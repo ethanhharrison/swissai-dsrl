@@ -1,5 +1,9 @@
 import argparse
 import sys
+
+from examples.libero_paths import ensure_libero_paths
+ensure_libero_paths()
+
 from examples.train_sim import main
 from jaxrl2.utils.launch_util import parse_training_args
 

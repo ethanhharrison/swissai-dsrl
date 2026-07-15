@@ -8,7 +8,7 @@ REPO=/global/home/users/ehharrison/swissai-dsrl
 LOGDIR=$REPO/slurm_logs
 mkdir -p "$LOGDIR"
 
-CONDA_SETUP='source /global/home/users/ehharrison/miniconda3/etc/profile.d/conda.sh && conda activate dsrl_pi0'
+CONDA_SETUP='source /global/home/users/ehharrison/miniconda3/etc/profile.d/conda.sh && conda activate arli'
 RUN_CMD="cd ${REPO} && DSRL_MULTI_TASK_IDS=28,79,44,59,43 bash ${REPO}/examples/scripts/run_libero_multitask.sh 20"
 
 jobid0=$(sbatch -A co_rail -p savio4_gpu --gres=gpu:A5000:1 -N 1 -n 1 -c 4 --qos=rail_gpu4_high -t 72:00:00 --mem=60G \
